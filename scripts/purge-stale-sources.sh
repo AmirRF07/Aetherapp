@@ -18,7 +18,7 @@
 # pipeline can never be broken again by a leftover file from an older version.
 #
 # Safety: only paths listed in .github/removed-sources.txt are ever touched,
-# and only inside app/ , native/aether/aether/src/ and docs/ .
+# and only inside app/ , native/aether/aether/src/ , docs/ and scripts/ .
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -36,7 +36,7 @@ else
 		case "$path" in
 			/*|*..*)
 				echo "::error::Refusing suspicious path in $MANIFEST: $path"; exit 1 ;;
-			app/*|native/aether/aether/src/*|docs/*) : ;;
+			app/*|native/aether/aether/src/*|docs/*|scripts/*) : ;;
 			*)
 				echo "::error::Path outside the allowed trees in $MANIFEST: $path"; exit 1 ;;
 		esac

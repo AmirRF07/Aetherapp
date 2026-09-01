@@ -21,6 +21,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -28,6 +29,7 @@ import studio.cluvex.aether.core.AetherController
 import studio.cluvex.aether.core.IpEndpoint
 import studio.cluvex.aether.core.NetProbe
 import studio.cluvex.aether.core.TunnelConfig
+import studio.cluvex.aether.data.LanguagePrefs
 import studio.cluvex.aether.data.OnboardingStore
 import studio.cluvex.aether.data.ProfileStore
 import studio.cluvex.aether.model.ConnectionProfile
@@ -40,6 +42,39 @@ import studio.cluvex.aether.ui.theme.AetherTheme
 import java.io.File
 
 class MainActivity : ComponentActivity() {
+
+    /**
+     * Applies the in-app language before a single resource is read.
+     *
+     * This is why the choice lives in SharedPreferences rather than the DataStore
+     * every other setting uses: `attachBaseContext` runs before `onCreate` and
+     * cannot suspend, so an async read would paint the first frame in the old
+     * language and then re-layout. See [LanguagePrefs].
+     */
+    override fun attachBaseContext(base: android.content.Context?) {
+        super.attachBaseContext(base?.let { LanguagePrefs.wrap(it) } ?: base)
+    }
+
+    /**
+     * Re-asserts the layout direction the language choice implies.
+     *
+     * `attachBaseContext` cannot do this on its own: the framework rewrites
+     * `Locale.getDefault()` from the activity's own locale list after it runs, and
+     * the decor view resolves its direction from exactly that. On an English phone
+     * with the app set to Persian, that is what left the whole UI unmirrored. See
+     * [LanguagePrefs] for the full chain.
+     */
+    private fun pinLayoutDirection() = LanguagePrefs.applyLayoutDirection(this)
+
+    /**
+     * `configChanges` keeps this activity alive across rotation, density and
+     * uiMode changes, so nothing re-runs `onCreate` to re-apply the direction -
+     * the framework's own re-application of the configuration, however, does run.
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        pinLayoutDirection()
+    }
 
     private lateinit var profileStore: ProfileStore
 
@@ -81,6 +116,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Before the first frame: the window has to agree with the language, or
+        // Compose inherits an LTR decor view and lays Persian out backwards.
+        pinLayoutDirection()
         enableEdgeToEdge()
         profileStore = ProfileStore(applicationContext)
         onboardingStore = OnboardingStore(applicationContext)
@@ -93,8 +131,20 @@ class MainActivity : ComponentActivity() {
             uiProfile.compareAndSet(null, profileStore.profile.first())
         }
         // Single background writer persisting the latest profile snapshot.
+        //
+        // UI-SPEED: `conflate()` alone still writes as fast as the collector can
+        // drain, so holding a key down in a text field produced a DataStore
+        // commit per keystroke - each one a serialise plus an fsync, on a device
+        // that is often already busy bringing a tunnel up. A short debounce
+        // collapses a burst of typing into ONE write of the final value, and
+        // conflate keeps only the newest snapshot in the meantime, so no
+        // intermediate value is ever written and nothing can be lost: the UI
+        // already owns the authoritative state in memory (see uiProfile).
         lifecycleScope.launch {
-            profileSaves.conflate().collect { snapshot -> profileStore.save(snapshot) }
+            profileSaves
+                .conflate()
+                .debounce(PROFILE_SAVE_DEBOUNCE_MS)
+                .collect { snapshot -> profileStore.save(snapshot) }
         }
 
         maybeRequestNotificationPermission()
@@ -245,6 +295,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Flushes the pending settings snapshot when the activity leaves the
+     * foreground.
+     *
+     * The debounce above is a batching window, not a place to lose data: if the
+     * user changes a setting and immediately leaves, the coroutine that would
+     * have written it 300ms later is cancelled with the lifecycle scope. Saving
+     * here closes that window. `lifecycleScope` is already cancelled by the time
+     * `onDestroy` runs, so this uses the store's own scope via a plain launch on
+     * the process scope instead.
+     */
+    override fun onStop() {
+        super.onStop()
+        val pending = uiProfile.value ?: return
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            runCatching { profileStore.save(pending) }
+        }
+    }
+
     private fun maybeRequestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
@@ -254,5 +323,15 @@ class MainActivity : ComponentActivity() {
     companion object {
         /** Set by the Quick Settings tile when it needs the consent dialog. */
         const val EXTRA_CONNECT_ON_LAUNCH = "studio.cluvex.aether.CONNECT_ON_LAUNCH"
+
+        /**
+         * How long a settings change waits before it is written to disk.
+         *
+         * Long enough to swallow a burst of typing, short enough that the value
+         * is durable well before the user can leave the screen - and irrelevant
+         * to correctness either way, because a connect reads the in-memory
+         * profile, not the stored one.
+         */
+        private const val PROFILE_SAVE_DEBOUNCE_MS = 300L
     }
 }

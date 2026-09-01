@@ -59,8 +59,8 @@ import studio.cluvex.aether.core.LogLine
  * exactly WHY no site loads even though the button says connected.
  */
 @Composable
-fun DiagnosticsPanel(modifier: Modifier = Modifier) {
-    var expanded by remember { mutableStateOf(false) }
+fun DiagnosticsPanel(modifier: Modifier = Modifier, startExpanded: Boolean = false) {
+    var expanded by remember { mutableStateOf(startExpanded) }
     val checks by DiagnosticsLog.checks.collectAsState()
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current

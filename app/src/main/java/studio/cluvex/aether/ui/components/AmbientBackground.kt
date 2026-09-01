@@ -32,4 +32,4 @@ fun AmbientBackground(
 }
 
 /** The flat app background colour. */
-private val BACKDROP = Color(0xFF0A0E1A)
+private val BACKDROP = Color(0xFF070B14)

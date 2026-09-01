@@ -37,7 +37,12 @@ fun <T> SegmentedSelector(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            // The track sits INSIDE a settings card, which is already
+            // surfaceVariant: a translucent surfaceVariant on top of it was
+            // very nearly invisible, so the control read as bare text. It now
+            // uses the next step up the elevation ramp, which is what makes a
+            // nested control legible on a dark surface.
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
             .padding(4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -49,16 +54,16 @@ fun <T> SegmentedSelector(
                 } else {
                     Color.Transparent
                 },
-                animationSpec = tween(300),
+                animationSpec = tween(160),
                 label = "segbg",
             )
             val fg by animateColorAsState(
                 targetValue = if (isSelected) {
                     MaterialTheme.colorScheme.onPrimary
                 } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
+                    MaterialTheme.colorScheme.onSurface
                 },
-                animationSpec = tween(300),
+                animationSpec = tween(160),
                 label = "segfg",
             )
             val interaction = remember { MutableInteractionSource() }

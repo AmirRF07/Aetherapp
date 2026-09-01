@@ -65,8 +65,9 @@ fun SharePanel(
     profile: ConnectionProfile,
     onProfileChange: (ConnectionProfile) -> Unit,
     modifier: Modifier = Modifier,
+    startExpanded: Boolean = false,
 ) {
-    var expanded by remember { mutableStateOf(false) }
+    var expanded by remember { mutableStateOf(startExpanded) }
     val arrowRotation by animateFloatAsState(if (expanded) 180f else 0f, tween(300), label = "shareArrow")
     val shareActive by ShareBridge.active.collectAsState()
     // Show the ACTUAL bound ports (fixed standard ports; null while a listener is
@@ -82,7 +83,10 @@ fun SharePanel(
     // asynchronous and thread-safe, so this can never block the UI.
     LaunchedEffect(state.isConnected, profile.lanShare, shareActive) {
         if (state.isConnected && profile.lanShare && !shareActive) {
-            withContext(Dispatchers.IO) { ShareBridge.start() }
+            // localOnly = false is the whole point of this panel: the user has
+            // turned LAN sharing on. Passed explicitly - the bridge defaults to
+            // loopback (see ShareBridge.start).
+            withContext(Dispatchers.IO) { ShareBridge.start(localOnly = false) }
         }
     }
 
@@ -159,7 +163,11 @@ fun SharePanel(
                                 // Take effect immediately for the current session
                                 // (the service also honours the flag on connect).
                                 if (state.isConnected) {
-                                    if (on) ShareBridge.start() else ShareBridge.stop()
+                                    if (on) {
+                                        ShareBridge.start(localOnly = false)
+                                    } else {
+                                        ShareBridge.stop()
+                                    }
                                 }
                             },
                         )

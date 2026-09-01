@@ -48,11 +48,17 @@ class AetherWidgetProvider : AppWidgetProvider() {
         }
 
         private fun paint(
-            context: Context,
+            rawContext: Context,
             manager: AppWidgetManager,
             id: Int,
             state: ConnectionState,
         ) {
+            // A widget provider is a BroadcastReceiver, so it has no
+            // attachBaseContext to override: the language is applied to the
+            // context handed in instead. Without this the launcher widget was
+            // the one surface left showing the phone's language while the rest
+            // of the app followed the in-app choice.
+            val context = studio.cluvex.aether.data.LanguagePrefs.wrap(rawContext)
             val views = RemoteViews(context.packageName, R.layout.aether_widget)
 
             val (text, color) = when (state) {

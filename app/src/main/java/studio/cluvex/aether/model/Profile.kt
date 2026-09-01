@@ -1,5 +1,6 @@
 package studio.cluvex.aether.model
 
+import androidx.compose.runtime.Immutable
 
 /** Transport protocol, mapped 1:1 to the desktop app's CLI flags. */
 enum class Protocol { AUTO, MASQUE, WIREGUARD, GOOL }
@@ -49,8 +50,23 @@ enum class CoreLogLevel(val raw: String) { OFF("off"), ERROR("error"), WARN("war
 /**
  * User-tunable connection profile. Knows how to turn itself into the engine's
  * CLI arguments and environment variables.
+ *
+ * UI-SPEED: annotated [Immutable], and it genuinely is - every field is a `val`
+ * and the two `List<String>` members are only ever replaced through `copy()`,
+ * never mutated in place. Without the annotation the Compose compiler infers
+ * this class as UNSTABLE (a `List` interface could be a mutable implementation),
+ * so it cannot skip ANY composable that takes a profile: one keystroke in one
+ * text field recomposed every control on the settings screen, which is a large
+ * part of why the settings menu felt slow to open and sluggish to use. With the
+ * annotation, equality is trusted and only the rows whose values actually changed
+ * recompose.
  */
+@Immutable
 data class ConnectionProfile(
+    /** Selects plain Aether or the chained Aether -> Psiphon network backend. */
+    val backend: TransportBackend = TransportBackend.AETHER,
+    /** ISO-3166 alpha-2 preferred exit; blank means automatic. */
+    val exitRegion: String = "",
     val protocol: Protocol = Protocol.AUTO,
     val scanMode: ScanMode = ScanMode.BALANCED,
     val ipVersion: IpVersion = IpVersion.V4,
@@ -203,6 +219,29 @@ data class ConnectionProfile(
      * the UI, so this stays on by default.
      */
     val autoReprovision: Boolean = true,
+
+    // ---- Added in 1.2.7 ----
+
+    /**
+     * Only reuse the cached ("quick reconnect") endpoint while it is still FAST,
+     * instead of merely still alive.
+     *
+     * The engine used to skip its scan for any cached endpoint that answered at
+     * all. A field log shows it reusing one at `rtt 472ms` while 100-143ms edges
+     * had just been measured on the same network, which roughly halves throughput
+     * - and in the chained mode that cost is paid on both hops. With this on, an
+     * over-budget cached endpoint is ignored and a normal scan picks a faster one
+     * (a few seconds, once). See `AETHER_QUICK_RECONNECT_MAX_RTT_MS` in [toEnv].
+     */
+    val fastEndpointOnly: Boolean = true,
+
+    /**
+     * True only for the Aether hop of a chained session, set by the VPN service.
+     *
+     * Never persisted and never shown: it exists so [toEnv] can tighten the
+     * cached-endpoint budget for a hop whose latency the user pays TWICE.
+     */
+    val chainedStage: Boolean = false,
 
 ) {
     /** True when a Zero Trust organization is configured and usable. */
@@ -380,6 +419,23 @@ data class ConnectionProfile(
         }
         if (!autoReprovision) put("AETHER_REPROVISION", "0")
 
+        // ---- 1.2.7: quick-reconnect endpoint budget ----
+        //
+        // Only sent when the user leaves the option on, so the engine keeps
+        // owning its own default (reuse anything that answers) when it is off.
+        // The chained hop gets a tighter budget because a chained session pays
+        // stage 1's latency on every packet AND again inside Psiphon's own hop.
+        if (fastEndpointOnly) {
+            put(
+                "AETHER_QUICK_RECONNECT_MAX_RTT_MS",
+                if (chainedStage) CHAINED_RTT_BUDGET_MS else DIRECT_RTT_BUDGET_MS,
+            )
+            put(
+                "AETHER_QUICK_RECONNECT_MAX_HANDSHAKE_MS",
+                if (chainedStage) CHAINED_HANDSHAKE_BUDGET_MS else DIRECT_HANDSHAKE_BUDGET_MS,
+            )
+        }
+
         // SECURITY: an upstream proxy URL can carry a username and password, so
         // it is handed over through the environment and NEVER as the `--upstream`
         // CLI argument: any local app can read /proc/<pid>/cmdline of a process
@@ -453,6 +509,19 @@ data class ConnectionProfile(
         val MTU_PRESETS = listOf(1280, 1380, 1420, 1500, 8500)
         /** Keepalive presets offered in the UI (0 = engine default). */
         val KEEPALIVE_PRESETS = listOf(0, 10, 25, 45)
+
+        // Cached-endpoint budgets, milliseconds (see [fastEndpointOnly]).
+        //
+        // The WireGuard probe measures one data-plane round trip, so the budget
+        // is an RTT. The MASQUE probe is a whole QUIC/TLS handshake and costs
+        // several round trips, hence the separate, larger number. Both are set
+        // above the good edges observed on Iranian mobile (100-150ms) with
+        // enough headroom that a healthy endpoint is never thrown away, and well
+        // below the 470ms+ that made the tunnel feel half-speed.
+        private const val DIRECT_RTT_BUDGET_MS = "320"
+        private const val DIRECT_HANDSHAKE_BUDGET_MS = "1400"
+        private const val CHAINED_RTT_BUDGET_MS = "180"
+        private const val CHAINED_HANDSHAKE_BUDGET_MS = "900"
 
         /** Hard caps so a pasted blob can't build a gigantic argv. */
         const val MAX_DNS_SERVERS = 8

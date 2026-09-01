@@ -91,7 +91,12 @@ GH_WEB="${CORE_GIT_BASE:-${SCHEME}://${GH_HOST}}"
 # and rebased the app's engine patches onto the real upstream baseline).
 # 1.2.6: raised to 1.7.0 (routing by sniffed name, upstream proxy, identity
 # reprovisioning); the app's manual-range patches were rebased onto it by hand.
-BASELINE="1.7.0"
+# 1.2.7: raised to 1.8.0 (world-reachable listener warning, non-blocking HTTP
+# head read, upstream-proxy SOCKS5 auth hardening, and the fix for the tokio
+# "JoinHandle polled after completion" panic in the Gool double-tunnel teardown).
+# The two manual-range patches were re-applied onto the new sources and, apart
+# from those marked blocks, the vendored tree is byte-identical to upstream.
+BASELINE="1.8.0"
 
 # App-specific patches carried on top of the upstream engine. These are MERGED
 # (three-way) onto the new upstream sources, never blind-copied over them.
@@ -103,6 +108,11 @@ BASELINE="1.7.0"
 PATCHED_FILES=(
   "aether/src/prober.rs"
   "aether/src/wg_prober.rs"
+  # lib.rs carries the quick-reconnect RTT budget: a cached endpoint is only
+  # reused when it is still FAST, not merely alive. Both patched regions are
+  # pure insertions inside AETHER-APP-PATCH markers, so stripping them yields
+  # the pristine upstream file byte for byte.
+  "aether/src/lib.rs"
 )
 
 log() { printf '[core-sync] %s\n' "$*"; }

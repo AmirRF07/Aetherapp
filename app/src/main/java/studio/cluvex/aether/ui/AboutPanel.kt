@@ -56,6 +56,9 @@ private val ORIGINAL_FEATURES = listOf(
 // What this edition adds on top of upstream (which ships no Android or
 // Windows GUI — CLI/Termux only).
 private val PORT_IMPROVEMENTS = listOf(
+    "Chained Aether → Psiphon transport added — a real foreign exit IP behind Aether's obfuscated first hop",
+    "Chained mode fixes the Iranian exit address plain Aether hands out, and opens AI services (Gemini and friends) that refuse it",
+    "Exit-country selector with flags for the chained mode, plus a UDP-capable SOCKS front so DNS and QUIC work through it",
     "Full native Android app — upstream is CLI-only (no Android or Windows GUI)",
     "One-tap system-wide VPN via Android VpnService — no manual proxy setup",
     "Embedded hev-socks5-tunnel (tun2socks) running in-process on a native thread",
@@ -72,13 +75,16 @@ private val PORT_IMPROVEMENTS = listOf(
 )
 
 /**
- * Collapsible "About" card: credits the upstream Aether project (Cluvex
- * Studio) with its GitHub + Telegram links and feature set, then lists what
- * this Android edition (QW-AI-Code) adds on top.
+ * Collapsible "About" card.
+ *
+ * The Android edition / GUI (QW-AI-Code) is credited FIRST with its GitHub link
+ * and everything it adds on top of upstream - including the chained
+ * `Aether -> Psiphon` transport - and the upstream Aether engine (Cluvex Studio)
+ * follows with its own links and feature set.
  */
 @Composable
-fun AboutPanel(modifier: Modifier = Modifier) {
-    var expanded by remember { mutableStateOf(false) }
+fun AboutPanel(modifier: Modifier = Modifier, startExpanded: Boolean = false) {
+    var expanded by remember { mutableStateOf(startExpanded) }
     val arrowRotation by animateFloatAsState(if (expanded) 180f else 0f, tween(300), label = "aboutArrow")
     val context = LocalContext.current
     val versionName = remember {
@@ -151,7 +157,26 @@ fun AboutPanel(modifier: Modifier = Modifier) {
 
                     Spacer(Modifier.height(16.dp))
 
-                    // ---- Original project (Cluvex Studio) ----
+                    // ORDER, deliberately: the author of THIS app (the GUI,
+                    // the Android runtime and the chained transports) comes
+                    // first, and the upstream engine's author follows. The
+                    // reader is holding this edition, so this edition's credit
+                    // and its feature list are what the panel opens on.
+
+                    // ---- This Android edition / GUI (QW-AI-Code) ----
+                    SectionHeader(
+                        title = stringResource(R.string.about_port_title),
+                        note = stringResource(R.string.about_port_note),
+                    )
+                    LinkRow(R.drawable.ic_github, "github.com/QW-AI-Code", URL_PORT_GITHUB)
+                    Spacer(Modifier.height(6.dp))
+                    FeatureList(PORT_IMPROVEMENTS)
+
+                    Spacer(Modifier.height(16.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                    Spacer(Modifier.height(14.dp))
+
+                    // ---- Upstream engine (Cluvex Studio) ----
                     SectionHeader(
                         title = stringResource(R.string.about_original_title),
                         note = stringResource(R.string.about_original_note),
@@ -160,19 +185,6 @@ fun AboutPanel(modifier: Modifier = Modifier) {
                     LinkRow(R.drawable.ic_telegram, "t.me/CluvexStudio", URL_ORIGINAL_TELEGRAM)
                     Spacer(Modifier.height(6.dp))
                     FeatureList(ORIGINAL_FEATURES)
-
-                    Spacer(Modifier.height(16.dp))
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
-                    Spacer(Modifier.height(14.dp))
-
-                    // ---- This Android edition (QW-AI-Code) ----
-                    SectionHeader(
-                        title = stringResource(R.string.about_port_title),
-                        note = stringResource(R.string.about_port_note),
-                    )
-                    LinkRow(R.drawable.ic_github, "github.com/QW-AI-Code", URL_PORT_GITHUB)
-                    Spacer(Modifier.height(6.dp))
-                    FeatureList(PORT_IMPROVEMENTS)
                 }
             }
         }

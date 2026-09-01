@@ -14,8 +14,10 @@ import studio.cluvex.aether.model.EndpointMode
 import studio.cluvex.aether.model.IpVersion
 import studio.cluvex.aether.model.Noize
 import studio.cluvex.aether.model.Protocol
+import studio.cluvex.aether.model.TransportBackend
 import studio.cluvex.aether.model.ScanMode
 import studio.cluvex.aether.model.SplitMode
+import studio.cluvex.aether.model.TeamAuth
 import studio.cluvex.aether.vpn.AetherVpnService
 
 /**
@@ -98,6 +100,8 @@ object AetherController {
  */
 object ProfileCodec {
     fun encode(p: ConnectionProfile): String = buildList {
+        add("backend=${p.backend.name}")
+        add("exitRegion=${p.exitRegion}")
         add("protocol=${p.protocol.name}")
         add("scan=${p.scanMode.name}")
         add("ip=${p.ipVersion.name}")
@@ -130,6 +134,35 @@ object ProfileCodec {
         add("noProfRetry=${p.noProfileRetry}")
         add("coreLog=${p.coreLogLevel.name}")
         add("blockedApps=${p.blockedApps.joinToString(",")}")
+        // ---------------------------------------------------------------
+        // 1.2.7 BUG FIX: everything below was ALREADY in the settings screen,
+        // already persisted, already turned into engine flags by
+        // ConnectionProfile.toArgs()/toEnv() - and never reached the engine,
+        // because the service reconstructs its profile from THIS codec and the
+        // codec did not carry any of it. So the in-tunnel DNS servers, both
+        // routing-rule lists, domain sniffing, the upstream proxy, identity
+        // replacement and the whole Zero Trust section were silently ignored at
+        // runtime: the user set them, the UI kept them, and the engine was
+        // launched without a single one of the corresponding flags.
+        //
+        // The two Zero Trust SECRETS are deliberately still absent. They live in
+        // the hardware-backed SecretStore and the service reads them from there
+        // itself (see AetherVpnService.hydrateSecrets), so a credential never
+        // travels inside an Intent.
+        // ---------------------------------------------------------------
+        add("dns=${p.dnsServers}")
+        add("routeBlock=${p.routeBlock}")
+        add("routeDirect=${p.routeDirect}")
+        add("sniff=${p.routeSniff}")
+        add("sniffMs=${p.routeSniffMs}")
+        add("upstream=${p.upstreamProxy}")
+        add("reprovision=${p.autoReprovision}")
+        add("fastEndpoint=${p.fastEndpointOnly}")
+        add("teamAuth=${p.teamAuth.name}")
+        add("team=${p.team}")
+        add("accessId=${p.accessClientId}")
+        add("accessEmail=${p.accessEmail}")
+        add("gateway=${p.gateway}")
     }.joinToString("\n")
 
     fun decode(raw: String?): ConnectionProfile {
@@ -147,6 +180,12 @@ object ProfileCodec {
         val d = ConnectionProfile()
         return runCatching {
             ConnectionProfile(
+                // fromStoredName, NOT enumOr: it migrates the retired backend
+                // names. The single-hop PSIPHON becomes the chained mode so an
+                // existing profile keeps the exit the user chose; the Tor names
+                // removed with the backend resolve to plain Aether.
+                backend = TransportBackend.fromStoredName(map["backend"]) ?: d.backend,
+                exitRegion = map["exitRegion"] ?: d.exitRegion,
                 protocol = map["protocol"]?.let { enumOr<Protocol>(it) } ?: d.protocol,
                 scanMode = map["scan"]?.let { enumOr<ScanMode>(it) } ?: d.scanMode,
                 ipVersion = map["ip"]?.let { enumOr<IpVersion>(it) } ?: d.ipVersion,
@@ -180,6 +219,20 @@ object ProfileCodec {
                 coreLogLevel = map["coreLog"]?.let { enumOr<CoreLogLevel>(it) } ?: d.coreLogLevel,
                 blockedApps = map["blockedApps"]?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }
                     ?: d.blockedApps,
+                // See the note in encode(): these used to be dropped here.
+                dnsServers = map["dns"] ?: d.dnsServers,
+                routeBlock = map["routeBlock"] ?: d.routeBlock,
+                routeDirect = map["routeDirect"] ?: d.routeDirect,
+                routeSniff = map["sniff"]?.toBooleanStrictOrNull() ?: d.routeSniff,
+                routeSniffMs = map["sniffMs"]?.toIntOrNull() ?: d.routeSniffMs,
+                upstreamProxy = map["upstream"] ?: d.upstreamProxy,
+                autoReprovision = map["reprovision"]?.toBooleanStrictOrNull() ?: d.autoReprovision,
+                fastEndpointOnly = map["fastEndpoint"]?.toBooleanStrictOrNull() ?: d.fastEndpointOnly,
+                teamAuth = map["teamAuth"]?.let { enumOr<TeamAuth>(it) } ?: d.teamAuth,
+                team = map["team"] ?: d.team,
+                accessClientId = map["accessId"] ?: d.accessClientId,
+                accessEmail = map["accessEmail"] ?: d.accessEmail,
+                gateway = map["gateway"]?.toBooleanStrictOrNull() ?: d.gateway,
             )
         }.getOrDefault(d)
     }

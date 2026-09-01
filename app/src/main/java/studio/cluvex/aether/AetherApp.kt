@@ -1,14 +1,29 @@
 package studio.cluvex.aether
 
 import android.app.Application
+import android.content.Context
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
 import android.util.Log
 import studio.cluvex.aether.core.DiagnosticsLog
+import studio.cluvex.aether.data.LanguagePrefs
 import java.io.File
 
 class AetherApp : Application() {
+
+    /**
+     * Applies the in-app language before ANY resource is read.
+     *
+     * The notification channel name and description are created in [onCreate]
+     * from string resources, so the language has to be in place by then -
+     * otherwise those two strings would be frozen in the phone's language for
+     * the lifetime of the install, because Android only creates a channel once.
+     */
+    override fun attachBaseContext(base: Context?) {
+        super.attachBaseContext(base?.let { LanguagePrefs.wrap(it) } ?: base)
+    }
+
     override fun onCreate() {
         super.onCreate()
 

@@ -72,10 +72,10 @@
     <string name="about_title">About</string>
     <string name="about_subtitle">Credits, links &amp; what this build adds</string>
     <string name="about_version">Version %1$s</string>
-    <string name="about_original_title">Original project — Cluvex Studio</string>
-    <string name="about_original_note">The core engine powering this app</string>
-    <string name="about_port_title">Android edition — QW-AI-Code</string>
-    <string name="about_port_note">What we upgraded in this edition</string>
+    <string name="about_original_title">Aether core — Cluvex Studio</string>
+    <string name="about_original_note">The upstream engine this app runs on</string>
+    <string name="about_port_title">Android app &amp; GUI — QW-AI-Code</string>
+    <string name="about_port_note">This edition: the GUI, the Android runtime and the chained transports</string>
     <string name="menu_open">Open menu</string>
     <string name="advanced_open">Open advanced settings</string>
 
@@ -255,7 +255,7 @@
     <string name="meta_endpoint">Endpoint</string>
     <string name="meta_latency">Latency</string>
 
-    <!-- Core 1.7.0 features (1.2.6) -->
+    <!-- Core 1.7.0 features retained in 1.2.7 -->
     <string name="route_sniff_title">Match domain rules behind the tunnel</string>
     <string name="route_sniff_desc">Reads the site name from the TLS/HTTP handshake, so the domain rules above also work on Android, where the engine otherwise only sees an IP address.</string>
     <string name="route_sniff_ms_label">Name wait window (ms)</string>
@@ -266,4 +266,60 @@
     <string name="upstream_help">Dials out through a proxy already running on this phone. socks5://host:port carries every protocol; http://host:port only carries MASQUE over HTTP/2, which is switched on for you. Credentials may be included as user:pass@host:port and are passed to the engine privately, never on its command line. Leave empty to connect directly.</string>
     <string name="reprovision_title">Replace a refused identity</string>
     <string name="reprovision_desc">If Cloudflare stops accepting the saved device identity, register a fresh one automatically instead of holding a tunnel that connects but carries no traffic.</string>
+    <!-- 1.2.7: the animated ping-strength meter on the latency slide -->
+    <string name="meta_ping_strength">Ping strength</string>
+    <string name="ping_quality_excellent">Excellent</string>
+    <string name="ping_quality_good">Good</string>
+    <string name="ping_quality_fair">Fair</string>
+    <string name="ping_quality_poor">Poor</string>
+    <string name="ping_quality_measuring">Measuring</string>
+    <string name="ping_quality_offline">Not connected</string>
+
+    <!-- 1.2.7: the settings screen, the in-app language switch and the
+         cached-endpoint budget -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_subtitle">Connection, apps, security and diagnostics</string>
+    <string name="settings_locked_hint">Disconnect to change the tunnel settings. They are handed to the engine when it starts.</string>
+    <string name="action_cancel">Cancel</string>
+
+    <string name="cat_group_tunnel">Tunnel</string>
+    <string name="cat_group_device">This device</string>
+    <string name="cat_group_app">App</string>
+    <string name="cat_group_tuning">Tuning</string>
+    <string name="cat_group_antidpi">Anti-DPI</string>
+    <string name="cat_group_recovery">Recovery</string>
+    <string name="section_core">Core</string>
+
+    <string name="cat_connection">Connection</string>
+    <string name="cat_connection_desc">Network backend, exit country, protocol and scanning</string>
+    <string name="cat_transport_desc">Obfuscation, endpoint, MTU and anti-DPI</string>
+    <string name="cat_dns_routing">DNS &amp; routing rules</string>
+    <string name="cat_dns_routing_desc">Resolvers inside the tunnel, block and bypass lists</string>
+    <string name="cat_upstream_desc">Dial out through a proxy already running on this phone</string>
+    <string name="cat_apps">Apps &amp; proxy</string>
+    <string name="cat_apps_desc">Proxy mode, split tunneling and blocked apps</string>
+    <string name="cat_security_desc">Kill switch, IPv6 leak protection and reconnects</string>
+    <string name="cat_engine_desc">Fragmentation, TLS groups and core log level</string>
+    <string name="cat_zerotrust_desc">Join a Cloudflare Zero Trust organization</string>
+    <string name="cat_appearance_desc">Choose English or Persian, or follow the phone</string>
+
+    <string name="backend_label">Network backend</string>
+    <string name="backend_help_aether">One hop through the bundled Aether/WARP engine. Fastest.</string>
+    <string name="backend_help_chained">Two hops: Aether connects first, then Psiphon tunnels through it. Your exit IP becomes Psiphon\'s, so sites that block Aether/WARP addresses open again.</string>
+    <string name="exit_country_label">Exit country</string>
+    <string name="exit_help_aether">Aether/WARP chooses its own anycast exit.</string>
+    <string name="exit_help_psiphon">Psiphon treats this as a hard region filter. If it cannot establish there, the app retries automatically with an automatic exit.</string>
+
+    <string name="fast_endpoint_title">Only reuse a fast endpoint</string>
+    <string name="fast_endpoint_desc">Quick reconnect skips the scan for the last endpoint that worked. With this on it is also checked for speed, and a slow one is replaced by a fresh scan instead of halving your download and upload for the whole session.</string>
+
+    <string name="language_title">Language</string>
+    <string name="language_desc">Applies to the whole app, including the notification, the Quick Settings tile and the home-screen widget. Persian switches the layout right to left.</string>
+    <string name="language_system">Follow the phone</string>
+    <string name="language_english">English</string>
+    <string name="language_persian">فارسی</string>
+
+    <string name="reset_confirm_title">Reset all settings?</string>
+    <string name="reset_confirm_body">Every setting goes back to its default, including endpoint ranges, routing rules and enrolment details.</string>
+    <string name="reset_confirm_ok">Reset</string>
 </resources>

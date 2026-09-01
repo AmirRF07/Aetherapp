@@ -3,6 +3,8 @@ package studio.cluvex.aether.core
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.IOException
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -62,9 +64,27 @@ object NetProbe {
         val hostIsDomain: Boolean,
     )
 
+    /**
+     * SECURITY (audit 1.2.7-r2): TLS FIRST, on purpose.
+     *
+     * The order used to be cleartext-first (`ip-api.com:80`), so on a healthy
+     * network the exit IP shown in the UI always arrived over plain HTTP - which
+     * anyone on the path can rewrite. On the networks this app exists for that is
+     * not theoretical: a censor able to answer the probe can make the badge show a
+     * plausible foreign IP and flag while the traffic is not tunnelled at all,
+     * turning the app's own reassurance into the attack. The authenticated
+     * provider is now tried first and the cleartext ones are only a
+     * last-resort availability fallback.
+     *
+     * The country REFINEMENT (see [refineCountry]) still uses ip-api over plain
+     * HTTP because its free tier offers no TLS. The country label is therefore
+     * informational and must never be treated as proof of anything; the exit IP,
+     * which is what the self-test and the user actually rely on, now comes from an
+     * authenticated source whenever one is reachable.
+     */
     private val GEO_PROVIDERS = listOf(
-        GeoProvider("ip-api.com", 80, "/json/?fields=status,query,countryCode", tls = false, hostIsDomain = true),
         GeoProvider("www.cloudflare.com", 443, "/cdn-cgi/trace", tls = true, hostIsDomain = true),
+        GeoProvider("ip-api.com", 80, "/json/?fields=status,query,countryCode", tls = false, hostIsDomain = true),
         GeoProvider("1.1.1.1", 80, "/cdn-cgi/trace", tls = false, hostIsDomain = false),
     )
 
@@ -327,6 +347,151 @@ object NetProbe {
     ): Boolean = runCatching {
         socks5Connect(socksHost, socksPort, destIp, destPort, useDomain = false, timeoutMs).use { true }
     }.getOrDefault(false)
+
+    /**
+     * Resolves a name over SOCKS5 **UDP ASSOCIATE** — the exact path every app on
+     * the device uses for DNS once the TUN is up.
+     *
+     * ## Why this check exists
+     *
+     * `Aether -> Psiphon` shipped connected and unable to open a single site, and
+     * the four-step self-test passed the whole time. It passed because
+     * [fetchIpInfoViaSocksRaced] resolves through a SOCKS5 `CONNECT` carrying a
+     * HOSTNAME, which the proxy resolves remotely on the TCP path. hev-socks5-tunnel
+     * does not do that: it carries UDP over `UDP ASSOCIATE`, and Psiphon's own
+     * SOCKS listener answers that command with a refusal
+     * (`socks5ReadCommand: SOCKS message field command was 0x03, not 0x01`). So the
+     * one code path the device actually depends on was the one path nothing tested.
+     *
+     * This probe speaks the same protocol hev does, against the same port, so the
+     * gap cannot reopen: if the device would not be able to resolve a name, this
+     * fails and the session is never reported Connected.
+     *
+     * @return true when a well-formed DNS response comes back with our own query
+     *   id. `NXDOMAIN` counts as success — the point is that a real resolver
+     *   answered through the tunnel, not what it said.
+     */
+    fun checkDnsViaSocksUdp(
+        socksHost: String,
+        socksPort: Int,
+        resolver: String = "1.1.1.1",
+        name: String = "cloudflare.com",
+        timeoutMs: Int = 8000,
+    ): Boolean = runCatching {
+        Socket().use { control ->
+            control.connect(InetSocketAddress(socksHost, socksPort), timeoutMs)
+            control.soTimeout = timeoutMs
+            val out = control.getOutputStream()
+            val input = DataInputStream(control.getInputStream())
+
+            out.write(byteArrayOf(0x05, 0x01, 0x00)); out.flush()
+            val greeting = ByteArray(2)
+            input.readFully(greeting)
+            if (greeting[0].toInt() != 0x05 || greeting[1].toInt() != 0x00) return@runCatching false
+
+            // UDP ASSOCIATE with a wildcard DST, per RFC 1928 §4: the client does
+            // not yet know which source address it will send from, and every
+            // forwarder this app uses asks exactly this way.
+            out.write(
+                byteArrayOf(
+                    0x05, 0x03, 0x00, 0x01,
+                    0, 0, 0, 0,
+                    0, 0,
+                )
+            )
+            out.flush()
+
+            if (input.read() != 0x05) return@runCatching false
+            val reply = input.read()
+            input.read() // reserved
+            val boundHost = when (input.read()) {
+                0x01 -> InetAddress.getByAddress(ByteArray(4).also { input.readFully(it) })
+                0x04 -> InetAddress.getByAddress(ByteArray(16).also { input.readFully(it) })
+                0x03 -> {
+                    val len = input.read()
+                    InetAddress.getByName(String(ByteArray(len).also { input.readFully(it) }))
+                }
+                else -> return@runCatching false
+            }
+            val boundPort = ((input.read() and 0xFF) shl 8) or (input.read() and 0xFF)
+            // rep=7 (command not supported) is the precise failure this probe was
+            // written for. Report it plainly instead of as a generic timeout.
+            if (reply != 0x00) return@runCatching false
+            if (boundPort == 0) return@runCatching false
+
+            // A BND.ADDR of 0.0.0.0 means "the address you already reached me on".
+            val target =
+                if (boundHost.address.all { it.toInt() == 0 }) InetAddress.getByName(socksHost)
+                else boundHost
+
+            val query = buildDnsQuery(name)
+            val request = ByteArray(10 + query.size).apply {
+                this[0] = 0; this[1] = 0; this[2] = 0 // RSV RSV FRAG
+                this[3] = 0x01                        // ATYP IPv4
+                System.arraycopy(InetAddress.getByName(resolver).address, 0, this, 4, 4)
+                this[8] = 0                           // port 53, big-endian
+                this[9] = 53
+                System.arraycopy(query, 0, this, 10, query.size)
+            }
+
+            DatagramSocket().use { udp ->
+                udp.soTimeout = timeoutMs
+                udp.send(DatagramPacket(request, request.size, target, boundPort))
+                val buffer = ByteArray(2048)
+                val packet = DatagramPacket(buffer, buffer.size)
+                udp.receive(packet)
+                isDnsAnswerFor(query, buffer, packet.length)
+            }
+        }
+    }.getOrDefault(false)
+
+    /**
+     * Validates a SOCKS5 UDP reply as a DNS answer to [query].
+     *
+     * Split out of [checkDnsViaSocksUdp] so the header walk has somewhere to bail
+     * out from: a `return@use` inside two nested `use` blocks binds to the
+     * innermost label, which is the kind of thing that reads correctly and
+     * behaves otherwise.
+     */
+    private fun isDnsAnswerFor(query: ByteArray, buffer: ByteArray, length: Int): Boolean {
+        if (length < 10) return false
+        // Strip the SOCKS5 UDP reply header, which mirrors the request's address
+        // form: RSV(2) FRAG(1) ATYP(1) ADDR PORT(2).
+        val addressLength = when (buffer[3].toInt() and 0xFF) {
+            0x01 -> 4
+            0x04 -> 16
+            0x03 -> (buffer[4].toInt() and 0xFF) + 1
+            else -> return false
+        }
+        val offset = 4 + addressLength + 2
+        if (length < offset + 12) return false
+        val id = ((buffer[offset].toInt() and 0xFF) shl 8) or (buffer[offset + 1].toInt() and 0xFF)
+        val expectedId = ((query[0].toInt() and 0xFF) shl 8) or (query[1].toInt() and 0xFF)
+        val isResponse = (buffer[offset + 2].toInt() and 0x80) != 0
+        return id == expectedId && isResponse
+    }
+
+    /** Minimal `A` query for [name]: 12-byte header, one question, no EDNS. */
+    private fun buildDnsQuery(name: String): ByteArray {
+        val body = ByteArrayOutputStream()
+        val id = (1..0xFFFE).random()
+        body.write((id shr 8) and 0xFF)
+        body.write(id and 0xFF)
+        body.write(0x01); body.write(0x00) // standard query, recursion desired
+        body.write(0x00); body.write(0x01) // QDCOUNT = 1
+        body.write(0x00); body.write(0x00) // ANCOUNT
+        body.write(0x00); body.write(0x00) // NSCOUNT
+        body.write(0x00); body.write(0x00) // ARCOUNT
+        name.split('.').filter { it.isNotEmpty() }.forEach { label ->
+            val bytes = label.toByteArray(Charsets.US_ASCII)
+            body.write(bytes.size)
+            body.write(bytes)
+        }
+        body.write(0x00)                   // root label
+        body.write(0x00); body.write(0x01) // QTYPE  A
+        body.write(0x00); body.write(0x01) // QCLASS IN
+        return body.toByteArray()
+    }
 
     // ---- SOCKS5 core ----------------------------------------------------
 

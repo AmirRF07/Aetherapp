@@ -29,7 +29,28 @@ app/src/main/java/studio/cluvex/aether/core/BadEdgeStore.kt
 app/src/main/java/studio/cluvex/aether/ui/components/ExitPolicyCard.kt
 native/aether/aether/src/geoguard.rs
 
+# --- Tor backend (removed in 1.2.7: TCP-only, so all device UDP had to be
+#     faked out of its DNSPort, and bootstrapping through the Aether handshake
+#     read as a hang) ---
+app/src/main/java/studio/cluvex/aether/transport/TorTransport.kt
+app/src/main/java/studio/cluvex/aether/transport/TorSocksFront.kt
+scripts/build-tor.sh
+
 # --- superseded by the unified connection card (removed in 1.2.6) ---
 app/src/main/java/studio/cluvex/aether/ui/components/StatusLine.kt
 app/src/main/java/studio/cluvex/aether/ui/components/TrafficPanel.kt
 app/src/main/java/studio/cluvex/aether/ui/components/ConnectionMeta.kt
+
+# --- dead resource swept by the 1.2.7 security audit: the FileProvider that
+#     used it went with the in-app updater in 1.2.2, so these paths described an
+#     export path that no longer exists ---
+app/src/main/res/xml/file_paths.xml
+
+# --- superseded by the settings screen (removed in 1.2.7): the single
+#     ~900-line "Advanced settings" card. Its controls now live in
+#     app/src/main/java/studio/cluvex/aether/ui/settings/. ---
+app/src/main/java/studio/cluvex/aether/ui/AdvancedPanel.kt
+
+# --- superseded by the bottom-sheet choice row (removed in 1.2.7): a
+#     DropdownMenu cannot present 56 exit countries usably on a phone. ---
+app/src/main/java/studio/cluvex/aether/ui/components/DropdownSelector.kt

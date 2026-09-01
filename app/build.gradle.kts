@@ -50,6 +50,24 @@ val hasReleaseKeystore: Boolean =
 // Source 3: the repo-persisted CI keystore. Decode it once at configuration
 // time so plain local `gradle assembleRelease` produces the SAME signature as
 // the APKs published by GitHub Actions.
+// ---------------------------------------------------------------------------
+// SECURITY FINDING (audit 1.2.7-r2) — CRITICAL, and deliberately NOT silently
+// changed here, because removing this key breaks in-place updates for everyone
+// who already installed a release signed with it.
+//
+// `.github/ci-keystore.jks.b64` is the RELEASE SIGNING KEY, committed to the
+// repository, and the password below is in this file in clear text. Anyone who
+// can read the repo can therefore produce an APK that Android accepts as an
+// in-place UPDATE of this app — same package name, same certificate, no warning,
+// full VPN privileges over every byte the victim's device sends. `.gitignore`
+// excludes `*.jks`, and the `.b64` suffix is what got this past it.
+//
+// For a censorship-circumvention VPN this is the highest-impact issue in the
+// project. It cannot be fixed by editing a file: it needs a key rotation.
+// docs/SECURITY_AUDIT_1.2.7-r2.md §1.1 has the migration plan. Until that is
+// done, every release-producing build prints the warning below, so it can never
+// happen again without somebody being told.
+// ---------------------------------------------------------------------------
 val ciKeystoreB64 = rootProject.file(".github/ci-keystore.jks.b64")
 val useCiKeystore: Boolean = !hasReleaseKeystore && ciKeystoreB64.exists()
 val ciKeystoreFile = rootProject.file("build/ci-release.keystore")
@@ -57,6 +75,18 @@ if (useCiKeystore) {
     ciKeystoreFile.parentFile.mkdirs()
     ciKeystoreFile.writeBytes(
         Base64.getMimeDecoder().decode(ciKeystoreB64.readText().trim()),
+    )
+    logger.warn(
+        "\n" +
+            "*******************************************************************\n" +
+            "  WARNING: signing with the PUBLIC CI keystore committed to this\n" +
+            "  repository (.github/ci-keystore.jks.b64, password in\n" +
+            "  app/build.gradle.kts). Anyone can sign an APK that installs OVER\n" +
+            "  this app as a legitimate update. Do not use this key for anything\n" +
+            "  users install. Provide a private keystore via keystore.properties\n" +
+            "  or the KEYSTORE_* environment variables.\n" +
+            "  See docs/SECURITY_AUDIT_1.2.7-r2.md section 1.1.\n" +
+            "*******************************************************************",
     )
 }
 
@@ -68,8 +98,8 @@ android {
         applicationId = "studio.cluvex.aether"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "1.2.6"
+        versionCode = 11
+        versionName = "1.2.7"
 
         ndk {
             // We ship arm64 (primary) and arm builds.
@@ -222,6 +252,7 @@ androidComponents {
 }
 
 dependencies {
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
     val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
     implementation(composeBom)
 

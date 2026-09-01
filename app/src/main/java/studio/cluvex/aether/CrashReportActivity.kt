@@ -39,8 +39,26 @@ import java.io.File
  */
 class CrashReportActivity : ComponentActivity() {
 
+    override fun attachBaseContext(base: android.content.Context?) {
+        super.attachBaseContext(
+            base?.let { studio.cluvex.aether.data.LanguagePrefs.wrap(it) } ?: base,
+        )
+    }
+
+    /**
+     * Same reason as in [MainActivity]: the window has to be mirrored from the
+     * stored language choice, because the framework resolves the decor view's
+     * direction from a default locale it rewrites behind our back. See
+     * [studio.cluvex.aether.data.LanguagePrefs].
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        studio.cluvex.aether.data.LanguagePrefs.applyLayoutDirection(this)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        studio.cluvex.aether.data.LanguagePrefs.applyLayoutDirection(this)
         val crashFile = File(filesDir, "last_crash.txt")
         val details = runCatching { crashFile.readText() }.getOrDefault("")
 

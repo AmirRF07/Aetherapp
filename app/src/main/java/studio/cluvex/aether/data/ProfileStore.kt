@@ -17,12 +17,15 @@ import studio.cluvex.aether.model.Protocol
 import studio.cluvex.aether.model.ScanMode
 import studio.cluvex.aether.model.SplitMode
 import studio.cluvex.aether.model.TeamAuth
+import studio.cluvex.aether.model.TransportBackend
 
 private val Context.dataStore by preferencesDataStore(name = "aether_profile")
 
 /** Persists the last-used [ConnectionProfile] with Jetpack DataStore. */
 class ProfileStore(private val context: Context) {
     private object Keys {
+        val backend = stringPreferencesKey("transportBackend")
+        val exitRegion = stringPreferencesKey("exitRegion")
         val protocol = stringPreferencesKey("protocol")
         val scan = stringPreferencesKey("scan")
         val ip = stringPreferencesKey("ip")
@@ -70,6 +73,7 @@ class ProfileStore(private val context: Context) {
         val routeSniff = booleanPreferencesKey("routeSniff")
         val routeSniffMs = intPreferencesKey("routeSniffMs")
         val autoReprovision = booleanPreferencesKey("autoReprovision")
+        val fastEndpointOnly = booleanPreferencesKey("fastEndpointOnly")
     }
 
     /**
@@ -84,6 +88,13 @@ class ProfileStore(private val context: Context) {
     val profile: Flow<ConnectionProfile> = context.dataStore.data.map { prefs ->
         val d = ConnectionProfile()
         ConnectionProfile(
+            // fromStoredName migrates the retired backend names (see
+            // TransportBackend): the single-hop PSIPHON of 1.2.6 becomes the
+            // chained mode, so a saved profile keeps the exit the user picked,
+            // while the Tor names, removed with the backend, resolve to Aether
+            // instead of silently re-routing through a different provider.
+            backend = TransportBackend.fromStoredName(prefs[Keys.backend]) ?: TransportBackend.AETHER,
+            exitRegion = prefs[Keys.exitRegion] ?: "",
             protocol = prefs[Keys.protocol]
                 ?.let { runCatching { Protocol.valueOf(it) }.getOrNull() } ?: Protocol.AUTO,
             scanMode = prefs[Keys.scan]
@@ -139,11 +150,16 @@ class ProfileStore(private val context: Context) {
             routeSniff = prefs[Keys.routeSniff] ?: true,
             routeSniffMs = prefs[Keys.routeSniffMs] ?: 0,
             autoReprovision = prefs[Keys.autoReprovision] ?: true,
+            // Defaults ON: reusing a slow cached endpoint is what halved
+            // throughput on chained sessions (see ConnectionProfile).
+            fastEndpointOnly = prefs[Keys.fastEndpointOnly] ?: true,
         )
     }
 
     suspend fun save(profile: ConnectionProfile) {
         context.dataStore.edit { prefs ->
+            prefs[Keys.backend] = profile.backend.name
+            prefs[Keys.exitRegion] = profile.exitRegion.uppercase()
             prefs[Keys.protocol] = profile.protocol.name
             prefs[Keys.scan] = profile.scanMode.name
             prefs[Keys.ip] = profile.ipVersion.name
@@ -187,6 +203,7 @@ class ProfileStore(private val context: Context) {
             prefs[Keys.routeSniff] = profile.routeSniff
             prefs[Keys.routeSniffMs] = profile.routeSniffMs
             prefs[Keys.autoReprovision] = profile.autoReprovision
+            prefs[Keys.fastEndpointOnly] = profile.fastEndpointOnly
         }
         // Secrets go to the Keystore-sealed store, never to the prefs file.
         secrets.write(SecretStore.ACCESS_SECRET, profile.accessClientSecret)

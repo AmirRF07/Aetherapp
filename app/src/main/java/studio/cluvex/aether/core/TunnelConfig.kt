@@ -31,6 +31,32 @@ object TunnelConfig {
      */
     const val MTU = 1280
 
+    /**
+     * SOCKS5 port the CHAINED second stage exposes (Aether -> Psiphon).
+     *
+     * The Aether engine owns [SOCKS_PORT] as stage 1, so the DNS-aware front of
+     * stage 2 binds here, and THIS is the port tun2socks, the share bridge and
+     * the self-test all talk to. The chained mode puts a front in front of its
+     * transport ([studio.cluvex.aether.transport.PsiphonSocksFront]) instead of
+     * exposing the transport's own listener.
+     */
+    const val CHAIN_SOCKS_PORT = 1825
+
+    /**
+     * Psiphon's own `LocalSocksProxyPort`, BEHIND the front.
+     *
+     * Never the port tun2socks talks to. psiphon-tunnel-core's SOCKS proxy is
+     * CONNECT-only and refuses `UDP ASSOCIATE` (`command was 0x03, not 0x01` in
+     * the field log, 636 times in one session), which killed every DNS query the
+     * device made. [studio.cluvex.aether.transport.PsiphonSocksFront] binds
+     * [CHAIN_SOCKS_PORT] and chains onto this one.
+     *
+     * 1.2.7 note: the two ports Tor used to own here (`SocksPort` 1822 and
+     * `DNSPort` 1823) are gone with the Tor runtime. Nothing in the app binds
+     * them any more.
+     */
+    const val PSIPHON_SOCKS_PORT = 1827
+
     /** DNS resolvers advertised on the TUN interface. */
     val DNS_SERVERS = listOf("1.1.1.1", "8.8.8.8")
 }

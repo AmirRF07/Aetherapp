@@ -80,7 +80,7 @@ data class AutoCandidate(
  *     (protocol + noize + fragment/ECH + the ranges that actually answered),
  *     most-likely-to-succeed first, plus a full-range last resort.
  *  4. The VpnService then walks the ladder: each candidate gets a real connect
- *     attempt gated by the 4-step self-test; the first one that passes wins.
+ *     attempt gated by the 5-step self-test; the first one that passes wins.
  *
  * Every probe result and every decision is written to the in-app log, so the
  * user can see exactly WHY Smart Auto picked what it picked.

@@ -72,10 +72,10 @@
     <string name="about_title">درباره</string>
     <string name="about_subtitle">سازندگان، لینک‌ها و تغییرات این نسخه</string>
     <string name="about_version">نسخه %1$s</string>
-    <string name="about_original_title">پروژه اصلی — Cluvex Studio</string>
-    <string name="about_original_note">هسته‌ی اصلی که این برنامه از آن قدرت می‌گیرد</string>
-    <string name="about_port_title">نسخه اندروید — QW-AI-Code</string>
-    <string name="about_port_note">مواردی که در این نسخه ارتقا داده‌ایم</string>
+    <string name="about_original_title">هستهٔ اتر — Cluvex Studio</string>
+    <string name="about_original_note">موتور اصلی که این برنامه روی آن اجرا می‌شود</string>
+    <string name="about_port_title">برنامهٔ اندروید و رابط کاربری — QW-AI-Code</string>
+    <string name="about_port_note">همین نسخه: رابط کاربری، اجرای اندروید و پروتکل‌های ترکیبی</string>
     <string name="menu_open">باز کردن منو</string>
     <string name="advanced_open">باز کردن تنظیمات پیشرفته</string>
 
@@ -254,7 +254,7 @@
     <string name="meta_endpoint">اندپوینت</string>
     <string name="meta_latency">تأخیر</string>
 
-    <!-- قابلیت‌های هستهٔ 1.7.0 (نسخهٔ ۱.۲.۶) -->
+    <!-- قابلیت‌های هستهٔ 1.7.0 حفظ‌شده در نسخهٔ ۱.۲.۷ -->
     <string name="route_sniff_title">تطبیق قواعد دامنه در پشت تونل</string>
     <string name="route_sniff_desc">نام سایت را از دست‌دادن اولیهٔ TLS/HTTP می‌خواند تا قواعد دامنهٔ بالا در اندروید هم کار کنند؛ چون در غیر این صورت موتور فقط یک آی‌پی می‌بیند.</string>
     <string name="route_sniff_ms_label">مدت انتظار برای نام (میلی‌ثانیه)</string>
@@ -265,4 +265,59 @@
     <string name="upstream_help">اتصال را از دل پراکسی‌ای که همین حالا روی گوشی اجراست بیرون می‌برد. آدرس socks5://host:port همهٔ پروتکل‌ها را حمل می‌کند؛ http://host:port فقط MASQUE روی HTTP/2 را که خودِ برنامه برایتان فعال می‌کند. نام کاربری و گذرواژه را می‌توانید به شکل user:pass@host:port بنویسید؛ این مقدار به‌صورت محرمانه به موتور داده می‌شود و هرگز در خط فرمان آن قرار نمی‌گیرد. برای اتصال مستقیم خالی بگذارید.</string>
     <string name="reprovision_title">جایگزینی شناسهٔ ردشده</string>
     <string name="reprovision_desc">اگر کلادفلر شناسهٔ ذخیره‌شدهٔ دستگاه را نپذیرد، به‌جای نگه‌داشتن تونلی که وصل می‌شود اما ترافیکی عبور نمی‌دهد، به‌صورت خودکار شناسهٔ تازه ثبت می‌کند.</string>
+    <!-- ۱.۲.۷: نمایشگر انیمیشنی قدرت پینگ در اسلاید تأخیر -->
+    <string name="meta_ping_strength">قدرت پینگ</string>
+    <string name="ping_quality_excellent">عالی</string>
+    <string name="ping_quality_good">خوب</string>
+    <string name="ping_quality_fair">متوسط</string>
+    <string name="ping_quality_poor">ضعیف</string>
+    <string name="ping_quality_measuring">در حال اندازه‌گیری</string>
+    <string name="ping_quality_offline">متصل نیست</string>
+
+    <!-- ۱.۲.۷: صفحهٔ تنظیمات، انتخاب زبان در خود برنامه و بودجهٔ اندپوینت کش‌شده -->
+    <string name="settings_title">تنظیمات</string>
+    <string name="settings_subtitle">اتصال، برنامه‌ها، امنیت و عیب‌یابی</string>
+    <string name="settings_locked_hint">برای تغییر تنظیمات تونل ابتدا قطع کنید؛ این مقادیر هنگام اجرای موتور به آن داده می‌شوند.</string>
+    <string name="action_cancel">انصراف</string>
+
+    <string name="cat_group_tunnel">تونل</string>
+    <string name="cat_group_device">این دستگاه</string>
+    <string name="cat_group_app">برنامه</string>
+    <string name="cat_group_tuning">تنظیم دقیق</string>
+    <string name="cat_group_antidpi">ضد DPI</string>
+    <string name="cat_group_recovery">بازیابی</string>
+    <string name="section_core">هسته</string>
+
+    <string name="cat_connection">اتصال</string>
+    <string name="cat_connection_desc">بک‌اند شبکه، کشور خروجی، پروتکل و اسکن</string>
+    <string name="cat_transport_desc">مبهم‌سازی، اندپوینت، MTU و ضد DPI</string>
+    <string name="cat_dns_routing">DNS و قواعد مسیریابی</string>
+    <string name="cat_dns_routing_desc">سرورهای DNS داخل تونل، فهرست مسدود و عبور مستقیم</string>
+    <string name="cat_upstream_desc">اتصال از دل پراکسی‌ای که همین حالا روی گوشی اجراست</string>
+    <string name="cat_apps">برنامه‌ها و پراکسی</string>
+    <string name="cat_apps_desc">حالت پراکسی، تانل تقسیم‌شده و برنامه‌های مسدود</string>
+    <string name="cat_security_desc">کیل‌سوییچ، محافظت از نشت IPv6 و اتصال مجدد</string>
+    <string name="cat_engine_desc">فرگمنت، گروه‌های TLS و سطح لاگ هسته</string>
+    <string name="cat_zerotrust_desc">عضویت در سازمان Cloudflare Zero Trust</string>
+    <string name="cat_appearance_desc">انتخاب فارسی یا انگلیسی، یا پیروی از گوشی</string>
+
+    <string name="backend_label">بک‌اند شبکه</string>
+    <string name="backend_help_aether">یک هاپ از موتور اتر/WARP همراه برنامه. سریع‌ترین حالت.</string>
+    <string name="backend_help_chained">دو هاپ: اول اتر وصل می‌شود، بعد سایفون از داخل آن تونل می‌زند. آی‌پی خروجی شما به سایفون تغییر می‌کند، پس سایت‌هایی که آدرس‌های اتر/WARP را بلاک می‌کنند باز می‌شوند.</string>
+    <string name="exit_country_label">کشور خروجی</string>
+    <string name="exit_help_aether">اتر/WARP خودش خروجی anycast را انتخاب می‌کند.</string>
+    <string name="exit_help_psiphon">سایفون این را یک فیلتر سخت‌گیرانه می‌داند. اگر نتواند در آن کشور وصل شود، برنامه به‌صورت خودکار با خروجی خودکار دوباره تلاش می‌کند.</string>
+
+    <string name="fast_endpoint_title">فقط اندپوینت سریع را دوباره استفاده کن</string>
+    <string name="fast_endpoint_desc">اتصال مجدد سریع برای آخرین اندپوینتی که کار کرده بود اسکن را رد می‌کند. با روشن بودن این گزینه، سرعت آن هم سنجیده می‌شود و اندپوینت کند با یک اسکن تازه جایگزین می‌شود، به‌جای آنکه سرعت دانلود و آپلود شما تا آخر آن نشست نصف بماند.</string>
+
+    <string name="language_title">زبان</string>
+    <string name="language_desc">روی کل برنامه اعمال می‌شود؛ شامل نوتیفیکیشن، تایل تنظیمات سریع و ویجت صفحهٔ اصلی. فارسی چیدمان را راست‌چین می‌کند.</string>
+    <string name="language_system">پیروی از گوشی</string>
+    <string name="language_english">English</string>
+    <string name="language_persian">فارسی</string>
+
+    <string name="reset_confirm_title">همهٔ تنظیمات بازنشانی شود؟</string>
+    <string name="reset_confirm_body">هر تنظیمی به حالت پیش‌فرض برمی‌گردد؛ شامل رنج‌های اندپوینت، قواعد مسیریابی و اطلاعات عضویت سازمانی.</string>
+    <string name="reset_confirm_ok">بازنشانی</string>
 </resources>

@@ -7,7 +7,7 @@ sealed interface ConnectionState {
     data object Connecting : ConnectionState
 
     /**
-     * Tunnel/proxy is up but the 4-step end-to-end self-test is still
+     * Tunnel/proxy is up but the 5-step end-to-end self-test is still
      * running. The UI must NOT present this as ready — Connected is only
      * reported once all four checks pass.
      */

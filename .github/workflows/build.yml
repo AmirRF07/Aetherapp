@@ -264,6 +264,9 @@ jobs:
       # and this step retries a failure that is clearly a download problem
       # (403/408/429/5xx, timeouts, "Could not resolve"). A real build error is
       # never retried, so a genuine compile failure still fails fast.
+      # 1.2.7 removed the Tor backend, so there is no native Tor core to build
+      # here any more (scripts/build-tor.sh is gone with it). The Aether core and
+      # the Psiphon AAR are the only native inputs left.
       - name: Build release APKs
         env:
           # Kotlin/Compose compilation needs more heap than the 1 GB Gradle

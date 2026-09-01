@@ -36,6 +36,29 @@ object PingMonitor {
     private val mutex = Mutex()
 
     /**
+     * SOCKS5 port a tunnelled probe goes through.
+     *
+     * ROOT CAUSE this fixes: the probe was hardcoded to
+     * [TunnelConfig.SOCKS_PORT] (1819), which in a CHAINED `Aether -> Psiphon`
+     * session is stage 1's own listener. The badge therefore measured the first
+     * hop only and said nothing about the path the user's traffic actually takes -
+     * exactly the wrong number to be looking at while diagnosing "the ping is over
+     * 1000". [AetherVpnService] publishes the finished pipeline's port here.
+     */
+    @Volatile
+    private var tunnelPort: Int = TunnelConfig.SOCKS_PORT
+
+    /** Points tunnelled probes at the port the finished pipeline exposes. */
+    fun setTunnelPort(port: Int) {
+        if (port in 1..65535) tunnelPort = port
+    }
+
+    /** Back to the engine's own listener; called on teardown. */
+    fun resetTunnelPort() {
+        tunnelPort = TunnelConfig.SOCKS_PORT
+    }
+
+    /**
      * Measures TCP handshake latency to 1.1.1.1:53.
      *
      * @param viaTunnel when true the probe socket is opened THROUGH the local
@@ -61,7 +84,7 @@ object PingMonitor {
                 Socket(
                     Proxy(
                         Proxy.Type.SOCKS,
-                        InetSocketAddress(TunnelConfig.SOCKS_HOST, TunnelConfig.SOCKS_PORT),
+                        InetSocketAddress(TunnelConfig.SOCKS_HOST, tunnelPort),
                     ),
                 )
             } else {

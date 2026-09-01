@@ -39,6 +39,13 @@ import studio.cluvex.aether.model.isConnected
  */
 class AetherTileService : TileService() {
 
+    /** The tile label and subtitle are user-visible, so they follow the app language. */
+    override fun attachBaseContext(base: android.content.Context?) {
+        super.attachBaseContext(
+            base?.let { studio.cluvex.aether.data.LanguagePrefs.wrap(it) } ?: base,
+        )
+    }
+
     private var listenScope: CoroutineScope? = null
 
     override fun onStartListening() {

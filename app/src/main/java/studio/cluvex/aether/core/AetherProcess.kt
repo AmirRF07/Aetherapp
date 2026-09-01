@@ -35,7 +35,7 @@ class AetherProcess(
         val proc = builder.start()
         process = proc
 
-        DiagnosticsLog.i("engine", "Spawned ${bin.name} ${profile.toArgs().joinToString(" ")}")
+        DiagnosticsLog.i("engine", "Spawned ${bin.name} ${redactArgs(profile.toArgs())}")
         // Drain stdout/stderr so a full pipe never blocks the engine, mirroring
         // every line into both logcat and the in-app diagnostics panel.
         Thread({
@@ -125,5 +125,38 @@ class AetherProcess(
     private companion object {
         /** How long a polite SIGTERM gets before we escalate to SIGKILL. */
         const val GRACEFUL_EXIT_MS = 250L
+    }
+
+    /**
+     * Flags whose VALUE identifies the user, their organization or the exact
+     * endpoint they are using. The flag itself is kept (it is what makes the log
+     * useful when a session fails); the value is not.
+     *
+     * SECURITY (audit 1.2.7-r2): the diagnostics log is app-private but it is
+     * also the file users are asked to share when they report a problem, and it
+     * survives a crash on disk. A Zero Trust team name, a hand-pinned gateway or
+     * the resolver set someone chose because of what their network blocks is
+     * exactly the metadata that should not travel out of the device inside a bug
+     * report. No secret was ever on the command line (those go through the
+     * environment, see ConnectionProfile.toEnv) - this closes the metadata half.
+     */
+    private val REDACTED_FLAGS = setOf(
+        "--team", "--peer", "--dns", "--route-block", "--route-direct",
+    )
+
+    /** Renders an argument list with the values of [REDACTED_FLAGS] masked. */
+    private fun redactArgs(args: List<String>): String {
+        val out = StringBuilder()
+        var index = 0
+        while (index < args.size) {
+            val arg = args[index]
+            out.append(if (out.isEmpty()) "" else " ").append(arg)
+            if (arg in REDACTED_FLAGS && index + 1 < args.size) {
+                out.append(" <redacted>")
+                index++
+            }
+            index++
+        }
+        return out.toString()
     }
 }

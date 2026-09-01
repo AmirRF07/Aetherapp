@@ -654,6 +654,7 @@ fn masque_reconnect_delay() -> std::time::Duration {
     let secs = std::env::var("AETHER_MASQUE_RECONNECT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
         .unwrap_or(2);
     std::time::Duration::from_secs(secs)
 }
@@ -697,6 +698,78 @@ async fn hunt_masque_peer(
     Ok(SocketAddr::new(best.ip, best.port))
 }
 
+
+// >>> AETHER-APP-PATCH quick-reconnect-rtt-budget
+/// How good a CACHED endpoint has to be before `--quick-reconnect` reuses it
+/// instead of scanning.
+///
+/// ROOT CAUSE this fixes. Quick reconnect reused any cached endpoint that still
+/// answered, no matter how slow it had become. A field log shows the cached
+/// WireGuard endpoint accepted at `rtt 472ms` and the scan skipped, in the same
+/// second the network fingerprint had measured 100-143ms edges: the session then
+/// ran on an endpoint three to four times slower than what was actually
+/// available, and kept running on it for as long as the cache survived. TCP
+/// throughput is inversely proportional to RTT, so both download and upload were
+/// roughly halved - and in the chained two-hop mode that penalty is paid twice,
+/// which is exactly the "Aether alone is fast, Aether + Psiphon is half speed"
+/// report this patch answers.
+///
+/// A cached endpoint is now only reused when it is not merely alive but still
+/// FAST. Over budget, the cache is skipped and a normal scan runs: that costs a
+/// few seconds once, and the better endpoint it finds is what gets re-cached.
+///
+/// Budget in milliseconds, read from `AETHER_QUICK_RECONNECT_MAX_RTT_MS` for the
+/// WireGuard/gool data-plane probe and from
+/// `AETHER_QUICK_RECONNECT_MAX_HANDSHAKE_MS` for the MASQUE probe (which is a
+/// full QUIC/TLS handshake and therefore several times an RTT). Unset, zero or
+/// unparsable disables the check and restores the previous behaviour exactly.
+fn env_budget_ms(name: &str) -> Option<std::time::Duration> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(std::time::Duration::from_millis)
+}
+
+fn within_budget(
+    peer: SocketAddr,
+    measured: std::time::Duration,
+    budget: Option<std::time::Duration>,
+    what: &str,
+) -> bool {
+    match budget {
+        Some(limit) if measured > limit => {
+            log::warn!(
+                "[-] cached endpoint {peer} answered but is slow ({what} {:?} over the {:?} budget); ignoring the cache and scanning for a faster endpoint",
+                measured,
+                limit
+            );
+            false
+        }
+        _ => true,
+    }
+}
+
+/// Data-plane RTT budget (WireGuard / gool cached endpoint).
+fn cached_peer_fast_enough(peer: SocketAddr, rtt: std::time::Duration) -> bool {
+    within_budget(
+        peer,
+        rtt,
+        env_budget_ms("AETHER_QUICK_RECONNECT_MAX_RTT_MS"),
+        "rtt",
+    )
+}
+
+/// Handshake budget (MASQUE cached gateway; one QUIC/TLS setup, not one RTT).
+fn cached_handshake_fast_enough(peer: SocketAddr, elapsed: std::time::Duration) -> bool {
+    within_budget(
+        peer,
+        elapsed,
+        env_budget_ms("AETHER_QUICK_RECONNECT_MAX_HANDSHAKE_MS"),
+        "handshake",
+    )
+}
+// <<< AETHER-APP-PATCH quick-reconnect-rtt-budget
 
 fn lastconn_path(config_path: &str) -> String {
     derive_sibling_path(config_path, "lastconn")
@@ -785,9 +858,17 @@ async fn run_masque(
             if let Ok(peer) = cached.peer.parse::<SocketAddr>() {
                 if want_quick_reconnect(&cached).await {
                     log::info!("[*] verifying cached gateway {peer} before reuse");
+                    // >>> AETHER-APP-PATCH quick-reconnect-rtt-budget
+                    let quick_probe_started = std::time::Instant::now();
+                    // <<< AETHER-APP-PATCH quick-reconnect-rtt-budget
                     if quick_verify_masque_peer(&identity, peer).await {
                         log::info!("[+] cached gateway {peer} still works; skipping scan");
                         quick_peer = Some(peer);
+                        // >>> AETHER-APP-PATCH quick-reconnect-rtt-budget
+                        if !cached_handshake_fast_enough(peer, quick_probe_started.elapsed()) {
+                            quick_peer = None;
+                        }
+                        // <<< AETHER-APP-PATCH quick-reconnect-rtt-budget
                     } else {
                         log::warn!("[-] cached gateway {peer} no longer works; scanning fresh");
                     }
@@ -1045,6 +1126,7 @@ fn wg_reconnect_delay() -> std::time::Duration {
     let secs = std::env::var("AETHER_WG_RECONNECT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
         .unwrap_or(2);
     std::time::Duration::from_secs(secs)
 }
@@ -1163,6 +1245,11 @@ async fn run_wireguard(identity: account::Identity, listen: SocketAddr, lastconn
                         Ok(rtt) => {
                             log::info!("[+] cached endpoint {peer} still works (rtt {:?}); skipping scan", rtt);
                             quick = Some((peer, profile, cached.profile.clone()));
+                            // >>> AETHER-APP-PATCH quick-reconnect-rtt-budget
+                            if !cached_peer_fast_enough(peer, rtt) {
+                                quick = None;
+                            }
+                            // <<< AETHER-APP-PATCH quick-reconnect-rtt-budget
                         }
                         Err(e) => {
                             log::warn!("[-] cached endpoint {peer} no longer works ({e}); scanning fresh");
@@ -1564,22 +1651,38 @@ async fn run_warp_in_warp(
     let http_task = spawn_http_proxy(&inner_stack);
     let mut socks_task = tokio::spawn(async move { socks::serve(listen, inner_stack).await });
 
-    let outcome = tokio::select! {
-        result = &mut outer_exit => join_outcome("outer wireguard tunnel", result),
-        result = &mut inner_exit => join_outcome("inner wireguard tunnel", result),
-        result = &mut socks_task => join_outcome("socks5 server", result),
+    #[derive(PartialEq)]
+    enum Winner {
+        Outer,
+        Inner,
+        Socks,
+    }
+
+    let (outcome, winner) = tokio::select! {
+        result = &mut outer_exit => (join_outcome("outer wireguard tunnel", result), Winner::Outer),
+        result = &mut inner_exit => (join_outcome("inner wireguard tunnel", result), Winner::Inner),
+        result = &mut socks_task => (join_outcome("socks5 server", result), Winner::Socks),
     };
 
     if let Some(task) = &http_task {
         task.abort();
     }
-    outer_exit.abort();
-    inner_exit.abort();
-    socks_task.abort();
 
-    let _ = outer_exit.await;
-    let _ = inner_exit.await;
-    let _ = socks_task.await;
+    // Whichever handle already resolved inside the select! above must not be
+    // polled again: tokio panics with "JoinHandle polled after completion"
+    // if you .await a JoinHandle that has already yielded Ready.
+    if winner != Winner::Outer {
+        outer_exit.abort();
+        let _ = outer_exit.await;
+    }
+    if winner != Winner::Inner {
+        inner_exit.abort();
+        let _ = inner_exit.await;
+    }
+    if winner != Winner::Socks {
+        socks_task.abort();
+        let _ = socks_task.await;
+    }
 
     drop(outer_stack);
 

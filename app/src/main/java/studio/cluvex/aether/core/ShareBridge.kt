@@ -131,14 +131,34 @@ object ShareBridge {
     private var bindHost = "127.0.0.1"
 
     /**
+     * The loopback SOCKS5 port every shared connection is relayed INTO.
+     *
+     * Normally the Aether engine's own listener. In a chained
+     * `Aether -> Psiphon` session the engine is only the first hop, so the
+     * bridge has to hand traffic to the SECOND stage's listener instead --
+     * otherwise proxy mode would quietly share the Aether exit while the UI
+     * (correctly) reported a Psiphon exit.
+     */
+    @Volatile
+    private var upstreamPort = TunnelConfig.SOCKS_PORT
+
+    /**
      * Turn sharing on. Safe to call from ANY thread — including the UI thread:
      * binding sockets is a network operation and Android throws
      * NetworkOnMainThreadException when it happens on the main thread, so the
      * actual work runs on a short-lived background thread and [active] flips
      * to true once both listeners are ready.
      */
-    fun start(localOnly: Boolean = false) {
-        thread(name = "share-start", isDaemon = true) { startSync(localOnly) }
+    /**
+     * SECURITY (audit 1.2.7): [localOnly] defaults to **true**, i.e. loopback.
+     * It used to default to `false`, so any call that forgot the argument bound
+     * an UNAUTHENTICATED proxy on `0.0.0.0` for the whole LAN. Every current
+     * caller passes the flag explicitly, so this changes no behaviour - it makes
+     * the dangerous case the one you have to ask for, instead of the one you get
+     * by omission.
+     */
+    fun start(localOnly: Boolean = true, upstreamPort: Int? = null) {
+        thread(name = "share-start", isDaemon = true) { startSync(localOnly, upstreamPort) }
     }
 
     /**
@@ -151,7 +171,19 @@ object ShareBridge {
      * proxy mode these listeners ARE the product, so a swallowed bind failure
      * meant "connected" with nothing listening on 1080/8118.
      */
-    fun startSync(localOnly: Boolean = false): Boolean = synchronized(this) {
+    fun startSync(
+        localOnly: Boolean = true,
+        /**
+         * Loopback SOCKS5 port to relay into, or null to keep whatever the
+         * running session configured.
+         *
+         * Null is what the user-facing sharing toggle passes: it must never
+         * silently retarget a live chained session back at the first hop, which
+         * a plain `Int = SOCKS_PORT` default would have done.
+         */
+        upstreamPort: Int? = null,
+    ): Boolean = synchronized(this) {
+        if (upstreamPort != null) this.upstreamPort = upstreamPort
         // Already up with a healthy listener? Nothing to do.
         if (_active.value && (socksServer?.isClosed == false || httpServer?.isClosed == false)) {
             return@synchronized true
@@ -332,7 +364,7 @@ object ShareBridge {
         try {
             upstream.tcpNoDelay = true
             upstream.connect(
-                InetSocketAddress(TunnelConfig.SOCKS_HOST, TunnelConfig.SOCKS_PORT),
+                InetSocketAddress(TunnelConfig.SOCKS_HOST, upstreamPort),
                 DIAL_TIMEOUT_MS,
             )
             relay(client, upstream)
@@ -414,7 +446,7 @@ object ShareBridge {
         return try {
             socket.tcpNoDelay = true
             socket.connect(
-                InetSocketAddress(TunnelConfig.SOCKS_HOST, TunnelConfig.SOCKS_PORT),
+                InetSocketAddress(TunnelConfig.SOCKS_HOST, upstreamPort),
                 DIAL_TIMEOUT_MS,
             )
             socket.soTimeout = 30_000
@@ -455,7 +487,12 @@ object ShareBridge {
             socket.soTimeout = 0
             socket
         } catch (e: Exception) {
-            DiagnosticsLog.e(TAG, "Upstream dial failed for $host:$port — $e")
+            // SECURITY (audit 1.2.7-r2): the destination is NOT logged. One line
+            // per failed flow turned the persisted diagnostics log into a partial
+            // browsing history, which is the one file users are asked to attach to
+            // a bug report. The port is enough to tell a broken upstream from a
+            // blocked destination, and the reason still names the failure.
+            DiagnosticsLog.e(TAG, "Upstream dial failed (dest port $port) — $e")
             runCatching { socket.close() }
             null
         }

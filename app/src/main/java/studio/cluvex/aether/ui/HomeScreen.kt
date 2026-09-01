@@ -5,30 +5,28 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.BugReport
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,7 +49,12 @@ import studio.cluvex.aether.ui.components.AmbientBackground
 import studio.cluvex.aether.ui.components.ButtonMode
 import studio.cluvex.aether.ui.components.ConnectButton
 import studio.cluvex.aether.ui.components.ConnectionCard
-import studio.cluvex.aether.ui.components.DiagnosticsPanel
+import studio.cluvex.aether.ui.components.FitToHeight
+import studio.cluvex.aether.ui.settings.RowDivider
+import studio.cluvex.aether.ui.settings.SettingsGroup
+import studio.cluvex.aether.ui.settings.SettingsHost
+import studio.cluvex.aether.ui.settings.SettingsNavRow
+import studio.cluvex.aether.ui.settings.SettingsRoute
 import studio.cluvex.aether.ui.theme.AetherMint
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -66,6 +69,28 @@ fun HomeScreen(
     onToggleConnection: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // UI-SPEED, and the single biggest win in this release: settings used to be a
+    // ModalBottomSheet holding a ~900-line, ~50-control card, AND the same card
+    // was a child of the navigation drawer. Now settings is its own screen and
+    // the home screen is DISPOSED while it is open, so the connect button, the
+    // connection card and its animated edge stop composing and animating
+    // entirely while the user is in settings - instead of running behind a sheet
+    // and competing for the same frame budget.
+    var settingsRoute by remember { mutableStateOf<SettingsRoute?>(null) }
+
+    val openRoute = settingsRoute
+    if (openRoute != null) {
+        SettingsHost(
+            start = openRoute,
+            state = state,
+            profile = profile,
+            onProfileChange = onProfileChange,
+            onClose = { settingsRoute = null },
+            modifier = modifier,
+        )
+        return
+    }
+
     val mode = when {
         state.isConnected -> ButtonMode.CONNECTED
         state.isBusy -> ButtonMode.BUSY
@@ -78,40 +103,34 @@ fun HomeScreen(
         // use, so the whole screen reads as one palette.
         ButtonMode.CONNECTED -> AetherMint
         ButtonMode.ERROR -> Color(0xFFFF5C7A)
-        else -> Color(0xFF4C8DFF)
+        else -> Color(0xFF5B93FF)
     }
 
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val drawerScope = rememberCoroutineScope()
-    // 1.2.2 UI-SPEED FIX: ModalNavigationDrawer composes its drawer content
-    // even while the drawer is CLOSED, so the diagnostics, share, advanced and
-    // about cards were live at all times — recomposing on every profile change
-    // and on every log line, behind a panel nobody was looking at. They are now
-    // only composed while the drawer is open or opening.
-    val drawerVisible = drawerState.isOpen || drawerState.targetValue == DrawerValue.Open
-
-    // Advanced settings, reachable directly from the home screen (top-right).
-    var showAdvancedSheet by remember { mutableStateOf(false) }
-    val advancedSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val settingsEnabled = state is ConnectionState.Idle || state is ConnectionState.Error
 
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
+            // The drawer is a MENU now, not a container for every panel in the
+            // app. It used to compose the diagnostics, share, advanced and about
+            // cards - all four, including the whole settings card - even while
+            // closed, which is why the first drawer swipe stuttered and why every
+            // engine log line recomposed something behind a panel nobody was
+            // looking at. Four rows cost nothing.
             ModalDrawerSheet(
                 drawerContainerColor = MaterialTheme.colorScheme.surface,
-                modifier = Modifier.fillMaxWidth(0.9f),
+                modifier = Modifier.fillMaxWidth(0.86f),
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
                         .statusBarsPadding()
                         .padding(horizontal = 16.dp, vertical = 20.dp),
                 ) {
                     Text(
                         text = stringResource(R.string.app_name),
-                        style = MaterialTheme.typography.titleLarge,
+                        style = MaterialTheme.typography.headlineSmall,
                         color = MaterialTheme.colorScheme.onBackground,
                     )
                     Text(
@@ -120,30 +139,41 @@ fun HomeScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
 
-                    Spacer(Modifier.height(20.dp))
+                    Spacer(Modifier.height(22.dp))
 
-                    if (drawerVisible) {
-                        DiagnosticsPanel()
+                    val go: (SettingsRoute) -> Unit = { route ->
+                        settingsRoute = route
+                        drawerScope.launch { drawerState.close() }
+                    }
 
-                        Spacer(Modifier.height(16.dp))
-
-                        SharePanel(
-                            state = state,
-                            profile = profile,
-                            onProfileChange = onProfileChange,
+                    SettingsGroup {
+                        SettingsNavRow(
+                            title = stringResource(R.string.settings_title),
+                            summary = stringResource(R.string.settings_subtitle),
+                            icon = Icons.Rounded.Settings,
+                            onClick = { go(SettingsRoute.HOME) },
                         )
-
-                        Spacer(Modifier.height(16.dp))
-
-                        AdvancedPanel(
-                            profile = profile,
-                            onProfileChange = onProfileChange,
-                            enabled = settingsEnabled,
+                        RowDivider()
+                        SettingsNavRow(
+                            title = stringResource(R.string.diag_title),
+                            summary = stringResource(R.string.diag_subtitle),
+                            icon = Icons.Rounded.BugReport,
+                            onClick = { go(SettingsRoute.DIAGNOSTICS) },
                         )
-
-                        Spacer(Modifier.height(16.dp))
-
-                        AboutPanel()
+                        RowDivider()
+                        SettingsNavRow(
+                            title = stringResource(R.string.share_title),
+                            summary = stringResource(R.string.share_subtitle),
+                            icon = Icons.Rounded.Wifi,
+                            onClick = { go(SettingsRoute.SHARE) },
+                        )
+                        RowDivider()
+                        SettingsNavRow(
+                            title = stringResource(R.string.about_title),
+                            summary = stringResource(R.string.about_subtitle),
+                            icon = Icons.Rounded.Info,
+                            onClick = { go(SettingsRoute.ABOUT) },
+                        )
                     }
                 }
             }
@@ -152,46 +182,58 @@ fun HomeScreen(
         Box(modifier = modifier.fillMaxSize()) {
             AmbientBackground(accent = accent, active = state.isConnected)
 
-            Column(
+            // NO SCROLLING ON THE HOME SCREEN, BY CONSTRUCTION.
+            //
+            // FitToHeight measures what this content naturally wants and, if the
+            // viewport is smaller, scales the whole subtree's density down by one
+            // measured factor - type, paddings, icons, radii and stroke widths
+            // together - until it fits exactly. Everything stays on screen on
+            // every device, at full rendering sharpness, and there is nothing
+            // left to scroll. See FitToHeight.
+            FitToHeight(
                 modifier = Modifier
                     .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 24.dp, vertical = 32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Top,
+                    // Insets are applied OUTSIDE the scaled subtree: system bars
+                    // are a physical size and must not shrink with the content.
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 20.dp, vertical = 8.dp),
             ) {
-                Text(
-                    text = stringResource(R.string.app_name),
-                    style = MaterialTheme.typography.headlineMedium,
-                    color = MaterialTheme.colorScheme.onBackground,
-                )
-                Text(
-                    text = stringResource(R.string.tagline),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Top,
+                ) {
+                    Text(
+                        text = stringResource(R.string.app_name),
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
+                    Text(
+                        text = stringResource(R.string.tagline),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
 
-                Spacer(Modifier.height(28.dp))
+                    Spacer(Modifier.height(8.dp))
 
-                ConnectButton(mode = mode, onClick = onToggleConnection)
+                    ConnectButton(mode = mode, onClick = onToggleConnection)
 
-                Spacer(Modifier.height(28.dp))
+                    // The button's box carries its own halo padding, so the gap
+                    // under it is only there to separate two surfaces.
+                    Spacer(Modifier.height(6.dp))
 
-                // 1.2.6: status, timer, IP, speeds and the protocol row used to
-                // be four separate floating surfaces here. They are one unified
-                // glass card now - see ConnectionCard.
-                ConnectionCard(
-                    connected = state.isConnected,
-                    statusTitle = stateTitle(state),
-                    statusCaption = stateSubtitle(state),
-                    connectedSince = connectedSince,
-                    ipInfo = ipInfo,
-                    ipLoading = ipLoading,
-                    error = state is ConnectionState.Error,
-                )
-
-                Spacer(Modifier.height(16.dp))
+                    ConnectionCard(
+                        connected = state.isConnected,
+                        statusTitle = stateTitle(state),
+                        statusCaption = stateSubtitle(state),
+                        connectedSince = connectedSince,
+                        ipInfo = ipInfo,
+                        ipLoading = ipLoading,
+                        error = state is ConnectionState.Error,
+                    )
+                }
             }
 
             IconButton(
@@ -208,9 +250,9 @@ fun HomeScreen(
                 )
             }
 
-            // Advanced settings straight from the home screen.
+            // Straight into the settings screen, one tap from the home screen.
             IconButton(
-                onClick = { showAdvancedSheet = true },
+                onClick = { settingsRoute = SettingsRoute.HOME },
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .statusBarsPadding()
@@ -221,45 +263,6 @@ fun HomeScreen(
                     contentDescription = stringResource(R.string.advanced_open),
                     tint = MaterialTheme.colorScheme.onBackground,
                 )
-            }
-        }
-    }
-
-    if (showAdvancedSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showAdvancedSheet = false },
-            sheetState = advancedSheetState,
-            containerColor = MaterialTheme.colorScheme.surface,
-        ) {
-            Column(
-                modifier = Modifier
-                    // The advanced card is much taller than a phone screen.
-                    // Give the sheet a bounded viewport and scroll that viewport;
-                    // otherwise Compose measures the whole card and Material's
-                    // bottom sheet clips its lower controls behind the nav bar.
-                    .fillMaxHeight(0.92f)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp)
-                    .navigationBarsPadding()
-                    .padding(bottom = 32.dp),
-            ) {
-                // 1.2.2 UI-SPEED FIX: the advanced card is ~40 controls tall and
-                // used to be composed in the SAME frame the sheet starts its
-                // slide-in animation, so the sheet visibly stuttered on open.
-                // The first frame now shows the empty sheet (instant) and the
-                // controls are composed immediately afterwards.
-                var sheetReady by remember { mutableStateOf(false) }
-                LaunchedEffect(Unit) { sheetReady = true }
-                if (sheetReady) {
-                    AdvancedPanel(
-                        profile = profile,
-                        onProfileChange = onProfileChange,
-                        enabled = settingsEnabled,
-                        startExpanded = true,
-                    )
-                } else {
-                    Spacer(Modifier.height(320.dp))
-                }
             }
         }
     }

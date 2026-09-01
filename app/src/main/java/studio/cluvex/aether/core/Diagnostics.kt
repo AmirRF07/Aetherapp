@@ -15,10 +15,18 @@ import kotlinx.coroutines.withContext
  *   handshake -> does it speak SOCKS5?
  *   tcp       -> can it open an outbound TCP connection (to an IP, no DNS)?
  *   dns_http  -> can it resolve a domain AND fetch over HTTP end-to-end?
+ *   udp_dns   -> can the DEVICE resolve, over SOCKS5 UDP ASSOCIATE?
  *
  * Example: port+handshake+tcp PASS but dns_http FAIL => the tunnel works but
- * DNS (SOCKS5 UDP ASSOCIATE / remote resolution) is broken — the usual reason a
+ * remote resolution on the proxy's TCP path is broken — the usual reason a
  * WARP-style tunnel "connects but no site loads".
+ *
+ * And the case that made the fifth step necessary: port+handshake+tcp+dns_http
+ * ALL PASS while udp_dns FAILS => the app can resolve for itself (it asks the
+ * proxy to resolve a hostname on a CONNECT) but nothing else on the phone can,
+ * because hev-socks5-tunnel carries device DNS over UDP ASSOCIATE. That is
+ * exactly how `Aether -> Psiphon` shipped: four green circles, a real exit IP,
+ * and not one page that loads.
  *
  * SPEED (1.2.1 root-cause rework): this self-test is now the GATE for the
  * Connected state, so every second it wastes is a second the user stares at
@@ -45,6 +53,19 @@ object Diagnostics {
     const val C_TCP = "tcp_via_proxy"
     const val C_DNS = "dns_http_via_tunnel"
 
+    /**
+     * DNS over SOCKS5 `UDP ASSOCIATE` — the path the DEVICE uses.
+     *
+     * Added in 1.2.7 after `Aether -> Psiphon` shipped connected and unable to
+     * open a single site while all four existing checks stayed green. They stayed
+     * green because [C_DNS] resolves through a `CONNECT` carrying a hostname,
+     * which the proxy resolves remotely on the TCP path, whereas
+     * hev-socks5-tunnel carries every real DNS query over `UDP ASSOCIATE` — the
+     * command Psiphon's own SOCKS listener refuses. The one code path the whole
+     * device depends on was the one path nothing tested.
+     */
+    const val C_UDP_DNS = "udp_dns_via_tunnel"
+
     private const val TAG = "diag"
 
     // How long we keep retrying the outbound checks after connect. Warp-in-warp
@@ -53,9 +74,31 @@ object Diagnostics {
     // That is a COLD START, not a failure, so give the engine a grace window
     // instead of failing on the very first attempt.
     private const val OUTBOUND_GRACE_MS = 90_000L
+
+    /**
+     * Grace window for chained Psiphon sessions.
+     *
+     * Longer than the Aether one on purpose. Psiphon's own handshake and server
+     * selection take seconds and its RTT is several times an Aether edge's, and a
+     * chained `Aether -> Psiphon` session pays both hops' warm-up. The 90 s
+     * Aether window was failing sessions that were merely slow, which is the
+     * worst possible outcome: everything works, and the app throws it away.
+     */
+    const val EXTERNAL_GRACE_MS = 150_000L
+
     private const val OUTBOUND_RETRY_DELAY_MS = 750L
     private const val TCP_PROBE_TIMEOUT_MS = 4_000
     private const val GEO_PROBE_TIMEOUT_MS = 6_000
+
+    /**
+     * Budget for one `UDP ASSOCIATE` DNS round trip.
+     *
+     * Generous on purpose: through a chained session the query crosses Aether,
+     * then Psiphon, then reaches a resolver, and a first lookup on a cold tunnel
+     * can take seconds. A tight timeout here would fail sessions that merely need
+     * a moment, which is a mistake this project has already made once.
+     */
+    private const val UDP_DNS_TIMEOUT_MS = 8_000
 
     fun resetChecks(
         host: String = TunnelConfig.SOCKS_HOST,
@@ -67,6 +110,7 @@ object Diagnostics {
                 ComponentCheck(C_HANDSHAKE, "SOCKS5 handshake"),
                 ComponentCheck(C_TCP, "TCP via proxy (1.1.1.1:80)"),
                 ComponentCheck(C_DNS, "DNS + HTTP via tunnel"),
+                ComponentCheck(C_UDP_DNS, "Device DNS (SOCKS5 UDP)"),
             )
         )
     }
@@ -75,6 +119,7 @@ object Diagnostics {
     suspend fun run(
         host: String = TunnelConfig.SOCKS_HOST,
         port: Int = TunnelConfig.SOCKS_PORT,
+        graceMs: Long = OUTBOUND_GRACE_MS,
     ): Boolean = withContext(Dispatchers.IO) {
         resetChecks(host, port)
         DiagnosticsLog.i(TAG, "Starting connectivity self-test…")
@@ -89,7 +134,7 @@ object Diagnostics {
         )
         DiagnosticsLog.log(TAG, if (portOpen) LogLevel.INFO else LogLevel.ERROR, "port open = $portOpen")
         if (!portOpen) {
-            failRemaining(C_HANDSHAKE, C_TCP, C_DNS)
+            failRemaining(C_HANDSHAKE, C_TCP, C_DNS, C_UDP_DNS)
             return@withContext false
         }
 
@@ -99,14 +144,14 @@ object Diagnostics {
         DiagnosticsLog.updateCheck(C_HANDSHAKE, if (handshake) CheckState.PASS else CheckState.FAIL)
         DiagnosticsLog.log(TAG, if (handshake) LogLevel.INFO else LogLevel.ERROR, "socks5 handshake = $handshake")
         if (!handshake) {
-            failRemaining(C_TCP, C_DNS)
+            failRemaining(C_TCP, C_DNS, C_UDP_DNS)
             return@withContext false
         }
 
         // 3 + 4. TCP-via-proxy and DNS+HTTP end-to-end — CONCURRENT, each with
         // its own fast retry loop over the shared cold-start grace window.
-        val deadline = System.currentTimeMillis() + OUTBOUND_GRACE_MS
-        val (tcp, info) = coroutineScope {
+        val deadline = System.currentTimeMillis() + graceMs
+        val (tcp, info, udpDns) = coroutineScope {
             val tcpJob = async {
                 DiagnosticsLog.updateCheck(C_TCP, CheckState.RUNNING)
                 var ok = NetProbe.checkTcpViaProxy(host, port, "1.1.1.1", 80, TCP_PROBE_TIMEOUT_MS)
@@ -127,7 +172,26 @@ object Diagnostics {
                 }
                 result
             }
-            Pair(tcpJob.await(), dnsJob.await())
+            val udpJob = async {
+                DiagnosticsLog.updateCheck(C_UDP_DNS, CheckState.RUNNING)
+                var ok = NetProbe.checkDnsViaSocksUdp(host, port, timeoutMs = UDP_DNS_TIMEOUT_MS)
+                while (!ok && System.currentTimeMillis() < deadline) {
+                    delay(OUTBOUND_RETRY_DELAY_MS)
+                    ok = NetProbe.checkDnsViaSocksUdp(host, port, timeoutMs = UDP_DNS_TIMEOUT_MS)
+                }
+                DiagnosticsLog.updateCheck(
+                    C_UDP_DNS,
+                    if (ok) CheckState.PASS else CheckState.FAIL,
+                    if (ok) "resolver answered" else "no answer",
+                )
+                DiagnosticsLog.log(
+                    TAG,
+                    if (ok) LogLevel.INFO else LogLevel.ERROR,
+                    "device dns via socks5 udp = $ok",
+                )
+                ok
+            }
+            Triple(tcpJob.await(), dnsJob.await(), udpJob.await())
         }
 
         val dnsOk = info != null
@@ -158,7 +222,63 @@ object Diagnostics {
                 else "Proxy cannot open outbound connections → engine has no upstream route.",
             )
         }
-        dnsOk
+        if (dnsOk && !udpDns) {
+            // The exact shape of the shipped Aether -> Psiphon bug: everything
+            // green, nothing opens. Say so in the words a user would search for.
+            DiagnosticsLog.e(
+                TAG,
+                "The tunnel carries TCP and resolves names on the proxy's own TCP path, but the " +
+                    "device's own DNS (SOCKS5 UDP ASSOCIATE) got no answer. Apps would connect to " +
+                    "nothing: this is the \"connected but no site opens\" failure, so the session is " +
+                    "not being reported as Connected.",
+            )
+        }
+
+        // Both have to pass. A tunnel that resolves only for the app's own
+        // probe is not a tunnel the phone can browse through, and reporting it
+        // Connected is what made this bug survive a whole release.
+        dnsOk && udpDns
+    }
+
+    /**
+     * Stage-1 gate for the CHAINED backend (`Aether -> Psiphon`).
+     *
+     * Deliberately NOT [run]. Stage 1 is only ever an intermediate hop: the
+     * exit, the DNS and therefore the flag all belong to stage 2, so demanding a
+     * geolocation round trip here would both add 5-30 s to every chained connect
+     * and paint the FIRST hop's country into the UI badge. All this has to prove
+     * is that the engine can open outbound TCP for Psiphon to ride on.
+     *
+     * It also leaves the four self-test circles alone: they describe the finished
+     * pipeline, and stage 1 flipping them green and then back to running looked
+     * exactly like the stale-circles bug this project already fixed once.
+     */
+    suspend fun runProxyStage(
+        host: String = TunnelConfig.SOCKS_HOST,
+        port: Int = TunnelConfig.SOCKS_PORT,
+        graceMs: Long = OUTBOUND_GRACE_MS,
+    ): Boolean = withContext(Dispatchers.IO) {
+        DiagnosticsLog.i(TAG, "Stage 1 check: is $host:$port a working SOCKS5 proxy?")
+        if (!PortProbe.isOpen(host, port, 1500)) {
+            DiagnosticsLog.e(TAG, "stage 1: nothing listening on $host:$port")
+            return@withContext false
+        }
+        if (!NetProbe.checkSocksHandshake(host, port)) {
+            DiagnosticsLog.e(TAG, "stage 1: $host:$port does not speak SOCKS5")
+            return@withContext false
+        }
+        val deadline = System.currentTimeMillis() + graceMs
+        var ok = NetProbe.checkTcpViaProxy(host, port, "1.1.1.1", 80, TCP_PROBE_TIMEOUT_MS)
+        while (!ok && System.currentTimeMillis() < deadline) {
+            delay(OUTBOUND_RETRY_DELAY_MS)
+            ok = NetProbe.checkTcpViaProxy(host, port, "1.1.1.1", 80, TCP_PROBE_TIMEOUT_MS)
+        }
+        DiagnosticsLog.log(
+            TAG,
+            if (ok) LogLevel.INFO else LogLevel.ERROR,
+            "stage 1: outbound TCP via $host:$port = $ok",
+        )
+        ok
     }
 
     private fun failRemaining(vararg ids: String) {
