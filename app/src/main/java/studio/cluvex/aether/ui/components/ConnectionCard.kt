@@ -555,8 +555,11 @@ private fun PingStrength(connected: Boolean, ms: Long) {
         animationSpec = tween(700),
         label = "pingLevel",
     )
-    val tint = pingTint(strength)
-    val quality = stringResource(pingQualityRes(connected, ms))
+    // One grade drives the word AND the colour, so green bars can never sit
+    // under the word "Fair" again. See [pingGrade].
+    val grade = pingGrade(connected, ms)
+    val tint = pingTint(grade)
+    val quality = stringResource(pingQualityRes(grade))
 
     // No frame subscription at all while the tunnel is down.
     val travel = if (connected) {
@@ -632,20 +635,54 @@ private fun PingStrength(connected: Boolean, ms: Long) {
     }
 }
 
-private fun pingTint(strength: Float): Color = when {
-    strength >= 0.66f -> AetherMint
-    strength >= 0.33f -> PING_FAIR
-    strength > 0.10f -> PING_POOR
-    else -> CardTextDim
+/**
+ * The ONE grade a latency reading has. Colour and label both come from here.
+ *
+ * ## ROOT CAUSE this fixes (reported directly, screenshot a2)
+ *
+ * There were TWO independent threshold tables and they disagreed:
+ *
+ *  * the colour came from a continuous `strength` ramp between [PING_BEST_MS]
+ *    (80 ms) and [PING_WORST_MS] (400 ms), and went mint at `strength >= 0.66`,
+ *    i.e. at any RTT up to **189 ms**;
+ *  * the label came from a separate ladder that called anything over **160 ms**
+ *    "Fair".
+ *
+ * So every reading between 161 and 189 ms rendered as green bars over the word
+ * "Fair". 173 ms - the exact number in a2 - sits in that window: strength 0.709
+ * (mint) against a label table that had already given up at 160. Neither number
+ * was wrong; there were simply two of them.
+ *
+ * `strength` keeps its own smooth ramp for the bar HEIGHT, because a continuous
+ * value is what an animation wants, but it no longer decides anything a word also
+ * decides. One enum, one set of cut-offs, and the comment in [PingStrength] that
+ * promised the three "can never disagree" is now actually true.
+ */
+private enum class PingGrade { OFFLINE, MEASURING, EXCELLENT, GOOD, FAIR, POOR }
+
+private fun pingGrade(connected: Boolean, ms: Long): PingGrade = when {
+    !connected -> PingGrade.OFFLINE
+    ms < 0L -> PingGrade.MEASURING
+    ms <= PING_EXCELLENT_MS -> PingGrade.EXCELLENT
+    ms <= PING_GOOD_MS -> PingGrade.GOOD
+    ms <= PING_FAIR_MS -> PingGrade.FAIR
+    else -> PingGrade.POOR
 }
 
-private fun pingQualityRes(connected: Boolean, ms: Long): Int = when {
-    !connected -> R.string.ping_quality_offline
-    ms < 0L -> R.string.ping_quality_measuring
-    ms <= PING_BEST_MS -> R.string.ping_quality_excellent
-    ms <= 160L -> R.string.ping_quality_good
-    ms <= 300L -> R.string.ping_quality_fair
-    else -> R.string.ping_quality_poor
+private fun pingTint(grade: PingGrade): Color = when (grade) {
+    PingGrade.EXCELLENT, PingGrade.GOOD -> AetherMint
+    PingGrade.FAIR -> PING_FAIR
+    PingGrade.POOR -> PING_POOR
+    PingGrade.OFFLINE, PingGrade.MEASURING -> CardTextDim
+}
+
+private fun pingQualityRes(grade: PingGrade): Int = when (grade) {
+    PingGrade.OFFLINE -> R.string.ping_quality_offline
+    PingGrade.MEASURING -> R.string.ping_quality_measuring
+    PingGrade.EXCELLENT -> R.string.ping_quality_excellent
+    PingGrade.GOOD -> R.string.ping_quality_good
+    PingGrade.FAIR -> R.string.ping_quality_fair
+    PingGrade.POOR -> R.string.ping_quality_poor
 }
 
 @Composable
@@ -804,7 +841,15 @@ private val ERROR_ACCENT = Color(0xFFFF5C7A)
 private const val LATENCY_REFRESH_MS = 4_000L
 
 // ---- ping meter tuning ----
-private const val PING_BEST_MS = 80L
+// 1.2.8-r4: the grade cut-offs and the bar-height ramp are declared together so
+// the next reader can see they are meant to line up. EXCELLENT is also the top of
+// the height ramp, and FAIR is its bottom, so the mint/amber boundary in the
+// colour and the Good/Fair boundary in the label are the same number by
+// construction rather than by coincidence.
+private const val PING_EXCELLENT_MS = 80L
+private const val PING_GOOD_MS = 190L
+private const val PING_FAIR_MS = 320L
+private const val PING_BEST_MS = PING_EXCELLENT_MS
 private const val PING_WORST_MS = 400L
 private const val PING_BARS = 26
 private val PING_BAR_GAP = 3.dp

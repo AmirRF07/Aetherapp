@@ -35,6 +35,9 @@ class AetherProcess(
         val proc = builder.start()
         process = proc
 
+        // 1.2.8-r5: say which build this is BEFORE the engine speaks, so the
+        // log identifies itself even if the engine dies immediately.
+        BuildProvenance.logApkIdentity()
         DiagnosticsLog.i("engine", "Spawned ${bin.name} ${redactArgs(profile.toArgs())}")
         // Drain stdout/stderr so a full pipe never blocks the engine, mirroring
         // every line into both logcat and the in-app diagnostics panel.
@@ -52,11 +55,18 @@ class AetherProcess(
                         // Desktop-parity info row: pick out the endpoint the
                         // engine selected (no-op for every other line).
                         EngineMeta.ingest(it)
+                        // Cross-check the engine's build stamp against this
+                        // APK's. See [BuildProvenance] for the r4 round this
+                        // single line would have saved.
+                        BuildProvenance.ingest(it)
                     }
                 }
             } catch (_: Exception) {
             } finally {
                 DiagnosticsLog.w("engine", "Engine output stream closed.")
+                // An engine that never identified itself is an engine older than
+                // r5, i.e. a stale native library in this install.
+                BuildProvenance.noteSilentEngine()
             }
         }, "aether-log").apply { isDaemon = true }.start()
     }

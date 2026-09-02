@@ -105,15 +105,42 @@ BASELINE="1.8.0"
 # Both power the 1.2.2 location picker (AETHER_SCAN_CIDRS). From 1.2.6 every
 # patched region is wrapped in AETHER-APP-PATCH markers, which is what makes the
 # pristine merge base reconstructible offline (see "pristine base" below).
-PATCHED_FILES=(
-  "aether/src/prober.rs"
-  "aether/src/wg_prober.rs"
-  # lib.rs carries the quick-reconnect RTT budget: a cached endpoint is only
-  # reused when it is still FAST, not merely alive. Both patched regions are
-  # pure insertions inside AETHER-APP-PATCH markers, so stripping them yields
-  # the pristine upstream file byte for byte.
-  "aether/src/lib.rs"
-)
+# ---------------------------------------------------------------------------
+# 1.2.8-r5 ROOT-CAUSE FIX: this list used to be maintained BY HAND, and that is
+# a latent time bomb this round found before it went off.
+#
+# The apply step below does `rm -rf "$CORE_DIR/aether"` and replaces the whole
+# directory with pristine upstream. Only files named here are merged back. So
+# every app patch that lived in a file NOT on this list was deleted on the next
+# core upgrade, silently, with a green build and no warning anywhere:
+#
+#   aether/Cargo.toml        <- the socket-tcp-cubic feature (the r4 root cause)
+#   aether/src/netstack.rs   <- set_congestion_control, device backpressure,
+#                               the data-plane telemetry, every queue bound
+#   aether/src/sysprofile.rs <- the split tx/rx netstack buffer sizing
+#   aether/build.rs          <- the whole build-provenance stamp
+#
+# In other words: the fix for the bug this project has been chasing for five
+# rounds was scheduled to be thrown away by our own CI the first time upstream
+# cut a release, and the log would have shown a perfectly clean upgrade while it
+# happened. Whatever else is true about the r4 field test, that alone had to be
+# fixed before any engine work could be trusted to survive.
+#
+# So the list is no longer written by a human. Every app patch is wrapped in
+# AETHER-APP-PATCH markers (that requirement already existed, for the merge
+# base); the set of patched files is therefore DISCOVERABLE, and it is now
+# discovered. Forgetting to add a file is no longer possible, because there is
+# nothing to add.
+discover_patched_files() {
+  ( cd "$CORE_DIR" && grep -rl -- "$PATCH_MARK" . 2>/dev/null \
+      | sed 's|^\./||' \
+      | grep -v '^\.upstream-baseline/' \
+      | grep -v '^target/' \
+      | sort )
+}
+
+# Populated right after PATCH_MARK is defined (see below).
+PATCHED_FILES=()
 
 log() { printf '[core-sync] %s\n' "$*"; }
 warn() { printf '[core-sync] %s\n' "$*" >&2; }
@@ -218,6 +245,20 @@ fi
 # warning: the manual endpoint range would have stopped working on the next
 # automatic core upgrade, silently, exactly like the 1.2.3 regression.
 PATCH_MARK="AETHER-APP-PATCH"
+
+# --------------------------------------------------- discover the app patches
+# See discover_patched_files() at the top of this file for why this is not a
+# hand-written list any more.
+mapfile -t PATCHED_FILES < <(discover_patched_files)
+if (( ${#PATCHED_FILES[@]} == 0 )); then
+  echo "::error::No AETHER-APP-PATCH markers found under ${CORE_DIR}." >&2
+  echo "Either the vendored engine carries no app patches (it should carry several)," >&2
+  echo "or the markers were stripped. Refusing to upgrade the core blind - that is" >&2
+  echo "exactly how an app patch gets deleted with a green build." >&2
+  exit 1
+fi
+log "App patches discovered by marker (${#PATCHED_FILES[@]}):"
+printf '[core-sync]   %s\n' "${PATCHED_FILES[@]}"
 
 strip_app_patch() {
   awk -v mark="$PATCH_MARK" '
@@ -362,6 +403,16 @@ for rel in "${PATCHED_FILES[@]}"; do
   if grep -qF -- "$PATCH_MARK" "$ours_pre" && ! grep -qF -- "$PATCH_MARK" "$final"; then
     warn "The app patch markers are gone from ${rel} after the merge - the patch was NOT carried over."
     dropped+=("$rel")
+    continue
+  fi
+  # 1.2.8-r5: markers surviving is necessary but not sufficient - a three-way
+  # merge can keep the marker comments and still lose lines between them. Count
+  # them and compare, so a partial rebase is caught too.
+  before="$(grep -cF -- "$PATCH_MARK" "$ours_pre" || true)"
+  after="$(grep -cF -- "$PATCH_MARK" "$final" || true)"
+  if [[ "$before" != "$after" ]]; then
+    warn "${rel} carried ${before} patch markers before the merge and ${after} after it - the rebase is incomplete."
+    dropped+=("$rel")
   fi
 done
 
@@ -381,8 +432,24 @@ engine patches can be rebased onto a new core instead of overwriting it.
 EOF
 
 if (( ${#dropped[@]} > 0 )); then
-  warn "App engine patch(es) NOT applied on ${target_v}: ${dropped[*]}"
-  notice_gh "Core upgraded to ${target_v} but the app patch for ${dropped[*]} could not be rebased. Manual-range scanning may be degraded until it is re-applied."
+  # ---------------------------------------------------------------- 1.2.8-r5
+  # This used to be a warning and the build carried on. That was the wrong
+  # trade, and this project paid for it: "a degraded feature is recoverable, a
+  # red build is not" is a reasonable rule for the manual-range scanner it was
+  # written for, and completely wrong for the netstack. Losing the congestion
+  # control or the device backpressure patch does not degrade a feature, it
+  # ships the exact bug five rounds of field testing were spent on, and it does
+  # it silently.
+  #
+  # An automatic convenience upgrade may not quietly revert an engine fix. If a
+  # patch cannot be rebased, this build stops and a human rebases it. The core
+  # rollback path in the workflow ("Build engine") still exists for genuine
+  # upstream API breakage, so the release is never actually stuck.
+  warn "App engine patch(es) could NOT be rebased onto core ${target_v}: ${dropped[*]}"
+  warn "Refusing to ship a core upgrade that reverts an app patch. Rebase it by hand,"
+  warn "or pin the core with CORE_TARGET=${current_v} / CORE_SYNC=off for this build."
+  notice_gh "Core upgrade to ${target_v} ABORTED: the app patch for ${dropped[*]} could not be rebased."
+  exit 1
 fi
 
 printf '%s\n' "$target_v" > "$VERSION_FILE"

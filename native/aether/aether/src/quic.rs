@@ -26,9 +26,12 @@ async fn bind_udp_fast(bind_addr: SocketAddr) -> Result<UdpSocket> {
     let sock = Socket::new(domain, Type::DGRAM, None).map_err(AetherError::Io)?;
     sock.set_nonblocking(true).map_err(AetherError::Io)?;
     
-    let buf_size = crate::sysprofile::udp_socket_buf_bytes();
-    let _ = sock.set_recv_buffer_size(buf_size);
-    let _ = sock.set_send_buffer_size(buf_size);
+    // >>> AETHER-APP-PATCH udp-socket-buffer-asymmetry
+    // 1.2.8-r6: rcv and snd are separate budgets. See upstream::tune_udp_buffers
+    // for why one figure for both was the root cause of the live-stream stall.
+    let _ = sock.set_recv_buffer_size(crate::sysprofile::udp_socket_rcv_buf_bytes());
+    let _ = sock.set_send_buffer_size(crate::sysprofile::udp_socket_snd_buf_bytes());
+    // <<< AETHER-APP-PATCH udp-socket-buffer-asymmetry
     
     sock.bind(&bind_addr.into()).map_err(AetherError::Io)?;
     UdpSocket::from_std(sock.into()).map_err(AetherError::Io)

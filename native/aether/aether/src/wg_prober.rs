@@ -135,6 +135,164 @@ pub struct WgProbe {
     pub excluded: HashSet<SocketAddr>,
 }
 
+// >>> AETHER-APP-PATCH scan-rtt-quality-gate (1.2.8-r4)
+/// RTT a scanned endpoint has to beat before the turbo scan commits to it.
+///
+/// ## ROOT CAUSE this fixes
+///
+/// `WgScanMode::Turbo` sets `early_exit_first`, and the loop below took that
+/// literally: **the first candidate that answered was returned, whatever its
+/// RTT**, 0.48 s into a 30 s budget with 79 of 80 candidates still unprobed.
+/// There was no quality check anywhere on the scan's own result - only on the
+/// CACHED endpoint, which produced a build that openly contradicted itself.
+/// From the field log, 2 ms apart:
+///
+/// ```text
+/// [-] cached endpoint 162.159.192.115:859 answered but is slow
+///     (rtt 396.851077ms over the 180ms budget); ignoring the cache and
+///     scanning for a faster endpoint
+/// [+] wg candidate ok 162.159.195.92:1701 rtt=475.011923ms
+/// [+] selected WireGuard endpoint 162.159.195.92:1701
+/// ```
+///
+/// It threw away a 397 ms endpoint for being too slow and then committed the
+/// whole session to a 475 ms one - **79 ms worse than what it had just
+/// rejected** - while the DPI fingerprint in the same second had measured
+/// 104-115 ms edges on the very ranges being scanned. Every number the user has
+/// screenshotted is built on top of that: the endpoint in a1 and a2 is this one,
+/// and in the chained mode its RTT is paid twice.
+///
+/// So the gate that guards the cache now guards the scan too, and by
+/// construction with the SAME number: `AETHER_SCAN_GOOD_RTT_MS` if the app sends
+/// it, otherwise `AETHER_QUICK_RECONNECT_MAX_RTT_MS` (the cache budget), other-
+/// wise 180 ms. It is impossible for this build to reject an endpoint as too
+/// slow and then choose a slower one.
+fn good_rtt_budget() -> Option<Duration> {
+    for name in ["AETHER_SCAN_GOOD_RTT_MS", "AETHER_QUICK_RECONNECT_MAX_RTT_MS"] {
+        if let Some(ms) = std::env::var(name)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+        {
+            return Some(Duration::from_millis(ms));
+        }
+    }
+    Some(Duration::from_millis(180))
+}
+
+/// How long the turbo scan keeps looking after an over-budget first answer.
+///
+/// The point of turbo is that connecting is fast, so this is deliberately short:
+/// a second of extra scanning, once, against a session that would otherwise run
+/// for an hour on a needlessly slow endpoint. The first answer is KEPT as the
+/// fallback throughout, so this can never turn a working connect into a failure -
+/// worst case it costs this much time and picks the same endpoint anyway.
+fn slow_first_grace() -> Duration {
+    let ms = std::env::var("AETHER_SCAN_SLOW_FIRST_GRACE_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(1_200);
+    Duration::from_millis(ms)
+}
+// <<< AETHER-APP-PATCH scan-rtt-quality-gate
+
+// >>> AETHER-APP-PATCH scan-rtt-floor (1.2.8-r5)
+/// The RTT a scan is not allowed to come back WORSE than, plus the endpoint that
+/// set it.
+///
+/// ## Why r4's gate was not enough
+///
+/// r4 added a quality target and its own doc comment claimed "it is impossible
+/// for this build to reject an endpoint as too slow and then choose a slower
+/// one." That claim was wrong, and the field log in this round shows the exact
+/// hole: the target only decides whether turbo commits EARLY. When the grace
+/// window closes and nothing under the target was found, the slow first answer
+/// is still returned as the fallback. On the logged run that fallback is
+/// 475.01 ms, and the cache that had just been discarded for being slow was
+/// 396.85 ms - so the contradiction survives r4 in full, and the session still
+/// ends up 78 ms worse off than doing nothing at all.
+///
+/// A target is an aspiration. What was missing is a FLOOR: a hard statement that
+/// whatever we replace the cache with must actually be better than the cache.
+///
+/// So the moment quick-reconnect discards a cached endpoint for being slow, it
+/// registers that endpoint and its measured RTT here. If the scan then finishes
+/// without beating it, [apply_rtt_floor] returns the cached endpoint instead of
+/// the slower winner. That endpoint was verified alive milliseconds earlier by
+/// the very probe that measured it, so reusing it is safe by construction, and it
+/// is strictly the better of the two choices available.
+///
+/// Net effect: rejecting the cache can now only ever IMPROVE the endpoint, never
+/// degrade it. The pathological case in the log becomes "no faster edge found,
+/// keeping the 396 ms cache".
+static RTT_FLOOR_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RTT_FLOOR_PEER: std::sync::Mutex<Option<SocketAddr>> = std::sync::Mutex::new(None);
+
+/// Registers the endpoint a scan has to beat. Called by quick-reconnect when it
+/// throws a cached endpoint away for being slow.
+pub fn set_rtt_floor(peer: SocketAddr, rtt: Duration) {
+    RTT_FLOOR_MS.store(rtt.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut guard) = RTT_FLOOR_PEER.lock() {
+        *guard = Some(peer);
+    }
+}
+
+/// Forgets the floor. Called once a session is actually up, so a later reconnect
+/// is never judged against a stale measurement.
+pub fn clear_rtt_floor() {
+    RTT_FLOOR_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut guard) = RTT_FLOOR_PEER.lock() {
+        *guard = None;
+    }
+}
+
+fn rtt_floor() -> Option<(SocketAddr, Duration)> {
+    let ms = RTT_FLOOR_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if ms == 0 {
+        return None;
+    }
+    let peer = (*RTT_FLOOR_PEER.lock().ok()?)?;
+    Some((peer, Duration::from_millis(ms)))
+}
+
+/// Substitutes the discarded endpoint back in when the scan failed to beat it.
+///
+/// Applied to the FIRST (fastest) element only: `distinct_by_ip` has already
+/// sorted by RTT, so if the head does not clear the floor, nothing does.
+fn apply_rtt_floor(mut picked: Vec<WgProbeResult>) -> Vec<WgProbeResult> {
+    let Some((peer, floor)) = rtt_floor() else {
+        return picked;
+    };
+    // Copy the head out before touching `picked` again: the insert below needs a
+    // mutable borrow and the comparison only needs three Copy fields.
+    let (best_ip, best_port, best_rtt) = match picked.first() {
+        Some(b) => (b.ip, b.port, b.rtt),
+        None => return picked,
+    };
+    if best_rtt <= floor {
+        return picked;
+    }
+    log::warn!(
+        "[-] the scan's best edge {}:{} (rtt {:?}) is SLOWER than the cached endpoint \
+         {peer} (rtt {:?}) that was discarded for being slow; keeping the cache, because \
+         replacing an endpoint with a worse one is not an upgrade",
+        best_ip,
+        best_port,
+        best_rtt,
+        floor,
+    );
+    let restored = WgProbeResult {
+        ip: peer.ip(),
+        port: peer.port(),
+        rtt: floor,
+    };
+    // Keep the scanned results behind it as alternates for the retry ladder.
+    picked.insert(0, restored);
+    picked
+}
+// <<< AETHER-APP-PATCH scan-rtt-floor
+
 pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<WgProbeResult> {
     hunt_wg_endpoints(probe, mode, 1)
         .await?
@@ -194,6 +352,12 @@ pub async fn hunt_wg_endpoints(
     let mut verified: Vec<WgProbeResult> = Vec::new();
     let mut found = 0usize;
     let mut quiet_until: Option<Instant> = None;
+    // 1.2.8-r4: set when turbo's first answer came back over budget, so the scan
+    // keeps looking for a fast one instead of committing to a slow one. Only
+    // reachable from the `early_exit_first` path, so multi-endpoint hunts
+    // (`want > 1`, which clears that flag above) behave exactly as before.
+    let rtt_budget = good_rtt_budget();
+    let mut hunting_for_fast = false;
 
     loop {
         let effective = match quiet_until {
@@ -221,9 +385,53 @@ pub async fn hunt_wg_endpoints(
                     Some(None) => continue,
                     Some(Some(pr)) => {
                         log::info!("[+] wg candidate ok {}:{} rtt={:?}", pr.ip, pr.port, pr.rtt);
-                        if st.early_exit_first {
+
+                        // >>> AETHER-APP-PATCH scan-rtt-quality-gate (1.2.8-r4)
+                        // See [good_rtt_budget]. "First to answer" is not the
+                        // same thing as "good", and turbo used to treat it as if
+                        // it were.
+                        let fast_enough = rtt_budget.map_or(true, |limit| pr.rtt <= limit)
+                            // >>> AETHER-APP-PATCH scan-rtt-floor (1.2.8-r5)
+                            // Committing early is only allowed if this answer is
+                            // also genuinely better than whatever cache we threw
+                            // away to get here. Without this the turbo fast path
+                            // could still exit on an endpoint the floor would have
+                            // rejected two lines later.
+                            && rtt_floor().map_or(true, |(_, floor)| pr.rtt <= floor);
+                            // <<< AETHER-APP-PATCH scan-rtt-floor
+
+                        if (st.early_exit_first || hunting_for_fast) && fast_enough {
+                            if hunting_for_fast {
+                                log::info!(
+                                    "[+] found a fast endpoint {}:{} (rtt {:?}) within the {:?} target; taking it over the slow first answer",
+                                    pr.ip, pr.port, pr.rtt, rtt_budget.unwrap_or_default(),
+                                );
+                            }
                             return Ok(vec![pr]);
                         }
+
+                        if st.early_exit_first {
+                            // Over budget. Keep it as the fallback, but spend a
+                            // short grace window looking for something better
+                            // instead of committing the whole session to it.
+                            // When the window closes, `distinct_by_ip` sorts by
+                            // RTT, so the FASTEST endpoint found wins - never
+                            // merely the first one to answer.
+                            log::warn!(
+                                "[-] first wg answer {}:{} is slow (rtt {:?} over the {:?} target); \
+                                 keeping it as a fallback and scanning {:?} more for a faster edge",
+                                pr.ip, pr.port, pr.rtt,
+                                rtt_budget.unwrap_or_default(), slow_first_grace(),
+                            );
+                            st.early_exit_first = false;
+                            hunting_for_fast = true;
+                            quiet_until = Some(Instant::now() + slow_first_grace());
+                            verified.push(pr);
+                            found += 1;
+                            continue;
+                        }
+                        // <<< AETHER-APP-PATCH scan-rtt-quality-gate
+
                         verified.push(pr);
                         found += 1;
 
@@ -259,7 +467,12 @@ pub async fn hunt_wg_endpoints(
         }
     }
 
-    let picked = distinct_by_ip(&verified);
+    // >>> AETHER-APP-PATCH scan-rtt-floor (1.2.8-r5)
+    // distinct_by_ip sorts by RTT, so the head is the fastest thing the scan
+    // found. apply_rtt_floor puts the discarded cache back in front of it when
+    // the scan failed to beat it. See [apply_rtt_floor].
+    let picked = apply_rtt_floor(distinct_by_ip(&verified));
+    // <<< AETHER-APP-PATCH scan-rtt-floor
     if picked.is_empty() {
         return Err(AetherError::NoCleanEndpoint);
     }

@@ -466,6 +466,10 @@ jobs:
       - name: Verify native libraries inside APKs
         run: |
           set -euo pipefail
+          # 1.2.8-r5: the engine inside each APK must carry this revision's stamp.
+          PATCH_LEVEL="$(tr -d '[:space:]' < PATCHLEVEL)"
+          [ -n "$PATCH_LEVEL" ] || { echo "ERROR: PATCHLEVEL is empty"; exit 1; }
+          echo "Expecting engine build stamp: AETHER-BUILD-STAMP:${PATCH_LEVEL}"
           found=0
           for apk in app/build/outputs/apk/release/*.apk; do
             [ -f "$apk" ] || continue
@@ -478,6 +482,22 @@ jobs:
                 || { echo "ERROR: $apk lacks hev for $abi"; exit 1; }
               printf '%s\n' "$entries" | grep -qx "lib/${abi}/libaethertun.so" \
                 || { echo "ERROR: $apk lacks the aethertun JNI bridge for $abi"; exit 1; }
+              # ---------------------------------------------------------- r5
+              # THE GATE THAT WOULD HAVE SAVED THE r4 ROUND.
+              # The engine inside the APK must carry THIS revision's build
+              # stamp. A stale libaether.so - from a cached jniLibs dir, a
+              # reverted core-sync, or a build.rs that did not run - is caught
+              # here, before the release exists, instead of costing a week of
+              # field testing on a binary nobody can identify.
+              unzip -p "$apk" "lib/${abi}/libaether.so" > /tmp/libaether-check.so
+              if ! grep -qa -- "AETHER-BUILD-STAMP:${PATCH_LEVEL}" /tmp/libaether-check.so; then
+                echo "ERROR: $apk ships an engine that is NOT patch level ${PATCH_LEVEL} ($abi)."
+                echo "Stamps found inside the shipped libaether.so:"
+                grep -ao 'AETHER-BUILD-STAMP:[0-9A-Za-z.\-]*' /tmp/libaether-check.so | sort -u || echo "  (none at all)"
+                exit 1
+              fi
+              echo "  $abi engine stamp OK: AETHER-BUILD-STAMP:${PATCH_LEVEL}"
+              rm -f /tmp/libaether-check.so
             done
             echo "Verified native cores in $apk (${abis[*]})"
           done

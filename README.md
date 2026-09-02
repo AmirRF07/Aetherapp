@@ -6,186 +6,21 @@
 
 ---
 
-## What's new in v1.2.7
+## What's new in v1.2.8
 
-Everything below is **new in this release**: what it does, and how to use it.
+Users reported several connection problems, especially when using chained mode (`Aether → Psiphon`). These problems have now been fixed:
 
-### ⚙️ A completely new Settings screen
+- In chained mode, sometimes only Telegram and Instagram opened. Browsers and many other apps did not work.
+- Gemini, ChatGPT and similar AI apps sometimes said there was no internet connection.
+- CapCut could fail to open or its effects would not load. It now works in chained mode, including loading effects.
+- TikTok could fail to open with Aether alone. Chained mode is recommended for TikTok and CapCut.
+- Sometimes the app showed that the connection was active, but browsing and live content did not work properly.
+- During long uploads or live sessions, the connection could become very slow or stop passing data. It can now handle this better and recover automatically.
+- Ping and connection status were not always reliable. The app now checks the connection more accurately and shows a more trustworthy status.
 
-**What it is.** Settings is now a screen of its own, laid out the way the system
-apps on your phone lay theirs out: a list of **categories** you tap into, controls
-**grouped into cards**, and a choice presented as a full-width **bottom-sheet
-picker** with the current option ticked. Each category row shows its current value
-on the right, so you can read your whole configuration without opening anything.
+These fixes apply to plain Aether and, where relevant, to `Aether → Psiphon`.
 
-The categories are **Connection** (backend, exit country, protocol, scan mode, IP
-version), **Transport & anti-DPI**, **DNS & routing rules**, **Upstream proxy**,
-**Apps & proxy**, **Security & stability**, **Share VPN**, **Language**,
-**Diagnostics & logs**, **Engine tuning**, **Zero Trust** and **About**.
-
-**How to use it.** Tap the **slider icon at the top right** of the home screen, or
-open the side menu (☰) and pick **Settings**. The system back gesture walks back up
-one level at a time.
-
-**The look.** One deep navy palette, hand-built, and it is now **pinned**: the app
-renders in exactly the same colours on every phone and every Android version.
-Every surface, switch, divider and picker comes from the same eight-step ramp, so
-the settings screens and the home screen finally read as one app.
-
-**A confirmation before a reset.** "Reset all settings to defaults" now asks first,
-so a mistap cannot wipe hand-typed endpoint ranges, routing rules and enrolment
-details.
-
-### 🌐 Choose the app's language yourself: English or فارسی
-
-**What it is.** The app still follows your phone by default, but you can now
-**pick the language inside the app** instead. Three options: **Follow the phone**,
-**English**, **فارسی**.
-
-**How to use it.** *Settings → Language*. The rows are labelled in their own
-language, so the one you want is recognisable even when the app is currently in the
-other. Pick one and the app applies it immediately.
-
-**What it covers.** Everything, not just the screens: the **status notification**,
-the **Quick Settings tile** and the **home-screen widget** all switch with it.
-Choosing فارسی also mirrors the whole interface **right to left**, and technical
-values (`ip:port`, CIDR ranges, proxy URLs) stay left to right where they belong.
-On Android 13 and newer your choice also appears under *System settings → Apps →
-Aether → Language*.
-
-### 🚀 A much faster, smoother app
-
-**What you get.** Settings opens **immediately** instead of sliding in and then
-hitching, and scrolling and toggling stay smooth on low-end hardware.
-
-Every settings page now builds only the rows that are actually on screen, each page
-carries a tenth of what one screen used to carry, the side menu is a light menu
-rather than a stack of live panels, and the home screen's animations stop entirely
-while you are in settings instead of competing for the same frames. Typing in a
-settings field is now a pure in-memory edit that is written to disk once when you
-pause, and a change to one setting repaints that one row instead of the whole
-screen.
-
-### ⚡ Keep full speed on a reconnect: **Only reuse a fast endpoint**
-
-**Why you want it.** Reconnecting reuses the last endpoint that worked, which is
-what makes a reconnect quick. But "it worked" is not the same as "it is still
-fast": a cached endpoint can answer at three or four times the round-trip time of
-the best one available right then, and because throughput falls as round-trip time
-rises, that alone can **roughly halve your download and upload** for the whole
-session. In the chained mode it costs more still, because you pay that latency on
-both hops.
-
-**What it does.** The cached endpoint is now timed as well as tested. If it is over
-budget it is passed over and a normal scan picks a faster one — a few seconds,
-once — and the better endpoint is what gets remembered for next time. The budget is
-automatically stricter for `Aether → Psiphon` than for plain Aether.
-
-**How to use it.** Nothing to do, it is **on by default**:
-*Settings → Transport & anti-DPI → Only reuse a fast endpoint*.
-
-### 🔀 Automatic exit-server rotation, so Google opens too
-
-**Why you want it.** In the chained mode some Psiphon servers are perfectly healthy
-and still refuse to connect you to particular destinations. The tunnel is up, the
-speed is fine, Telegram loads every one of its endpoints — and Google will not
-open. That is the exit server declining those port forwards, and until now the only
-cure was to disconnect and reconnect until you drew a better one.
-
-**What it does.** The app now watches for that pattern: a server that turns down
-**many different destinations** in a short window is filtering rather than
-hiccupping, and the session is **moved to another exit server automatically**. The
-tunnel, the TUN interface and every local port stay exactly as they are, so you see
-a brief stall rather than a disconnect. Rotations are rate-limited and capped per
-session, so this can never turn into a loop.
-
-**And UDP gets a clean slate with it.** If the server you left had refused the UDP
-port forward, that is not held against the new one: real UDP (so DNS and QUIC) is
-retried on the new server instead of staying downgraded for the rest of the
-session.
-
-### 🛠️ Your DNS, routing, upstream-proxy and Zero Trust settings now take effect
-
-Everything on *DNS & routing rules*, *Upstream proxy* and *Zero Trust* is now
-handed to the engine when it starts: in-tunnel resolvers, the block and bypass
-lists, matching domain rules on the name read from the first bytes of a flow, the
-upstream proxy, automatic identity replacement, and the full Zero Trust enrolment.
-Your organization credentials are read straight from the hardware-backed secure
-store when the tunnel starts, so a credential is never passed around inside the
-app.
-
-### 🌍 New chained mode: `Aether → Psiphon`
-
-**Why you want it.** Plain Aether leaves through Cloudflare's anycast edge, and on Iranian networks the address you come out on is very often **an Iranian one**. A large set of services treats that address exactly the way it treats your real one: the tunnel is up, the site still refuses you. The chained mode swaps the **exit** without giving up Aether's obfuscation on the hop that actually has to survive the local network, so:
-
-- **the exit IP is no longer Iranian.** It is Psiphon's, in a real foreign country, and you choose which one.
-- **AI services open.** Gemini and the rest of the family that turns away Iranian and Cloudflare-anycast addresses load normally through this mode. So do the destinations that block WARP anycast outright.
-
-**How to use it.** Tap the **slider icon at the top right** of the home screen (or open the side menu) → **Network backend** → **`Aether → Psiphon`**. Just under it, pick an **exit country** if you want a specific one — every row shows its flag — or leave it on **Automatic** and the fastest available exit is chosen for you. Then connect as usual. Change either setting while disconnected.
-
-**What to expect.** The connect is slower than plain Aether, because two hops have to warm up before the tunnel is real. Give it a few extra seconds; "Connecting" is not a hang.
-
-How it is wired, for the curious:
-
-```
-stage 1   Aether engine    -> SOCKS5 127.0.0.1:1819      no TUN yet
-stage 2   Psiphon          -> SOCKS5 127.0.0.1:1825      dials out through 1819
-then      TUN + tun2socks  -> 127.0.0.1:1825             exit IP = Psiphon
-```
-
-Psiphon rides the first hop through `UpstreamProxyUrl` and routes *every* connection it makes through it, including its directory and server-list fetches, so the chain cannot leak a direct dial. Both hops are supervised: if stage 1 dies the session is rebuilt rather than left "connected" over a proxy that cannot dial.
-
-### 🌐 Real UDP through the chain, so DNS and QUIC both work
-
-Nothing to switch on: the chained mode carries datagrams, not only TCP streams. A UDP-capable SOCKS5 front (`PsiphonSocksFront`) owns the port tun2socks talks to and multiplexes every UDP association onto one remote udpgw stream through Psiphon, exactly as the official Psiphon Android client does — so name resolution and QUIC-based apps behave normally instead of stalling.
-
-If a server refuses that port forward, port-53 datagrams are answered over **DNS-over-TCP** through the same tunnel for the rest of the session, and non-DNS UDP is dropped. QUIC reads an unanswered handshake as "no QUIC here" and falls back to TCP in a few hundred milliseconds, so **name resolution never depends on the intercept being available**.
-
-### 🔬 The self-test now checks the one thing your phone actually needs: **Device DNS**
-
-A fifth step, **Device DNS (SOCKS5 UDP)**, speaks the same protocol the forwarder does, against the same port, and it **gates the Connected state**: if your phone would not be able to resolve a name, the app does not tell you it is connected.
-
-**How to use it.** Side menu (☰) → **Diagnostics** → **Run self-test**. Five green rows mean the tunnel carries TCP *and* UDP, not just TCP.
-
-### 🧱 Protocol, endpoint and latency each get their own row
-
-They used to share one three-column strip, each column a third of a phone screen wide — `WIREGUARD` arrived as `WIREGUARD ...` and an `ip:port` endpoint was almost always just `...`. Each fact now has its own **full-width row inside the connection card**, label on the left, value on the right with the whole card width to use, and two lines for an endpoint that needs them. Nothing to do: look at the block under the connect button.
-
-### 📈 A live ping-strength meter
-
-The latency row carries a travelling waveform whose height, brightness and colour follow the last measurement: **mint** for a fast tunnel, **amber** for fair, **rose** for poor, with the quality word beside it. The app re-measures every few seconds through the tunnel itself, and holds the last good reading so the row never blinks.
-
-### 📱 The whole home screen fits on one screen — no scrolling
-
-The title, the connect button and the connection card are now measured against the room your device actually has, and if the content is taller than the screen the entire block is scaled down by one measured factor until it fits — type, paddings, icons, radii and stroke widths together. **You never have to scroll to see the end of the block**, on any phone, in either language, at any system font size. Because it is a real layout at a real density (not a stretched bitmap), the shrunk UI is exactly as sharp as the unscaled one.
-
-### 🌈 The travelling light runs in the primary colours
-
-While the tunnel is up, segments of light travel around the connection card's border and breathe like an audio equaliser. Each full lap runs in **one colour**, and the next lap takes the next: **red → green → blue → yellow**, then back to red, endlessly. The bloom is drawn as five graded additive strokes with a smoothstep on the amplitude and round joins on the corners, so the light reads as a sharp filament with a smooth falloff instead of a banded blob.
-
-### ✔️ A tick on the connect button
-
-Once you are through, the button shows **one large tick** on its glowing disc. The button carries no travelling ring any more: one light show per screen, and the height it used to reserve for its bloom went to the content block instead.
-
-### 🔀 Upstream proxy, domain rules behind the tunnel, and identity replacement
-
-- **Upstream proxy (chaining)** — *Advanced → Upstream proxy*. Send everything Aether dials through a proxy already running on the phone: `socks5://127.0.0.1:1080`, `socks5://user:pass@host:port`, `http://host:port`, or a bare `host:port`. SOCKS5 carries every transport; an HTTP CONNECT proxy cannot carry UDP, so pointing the app at one **switches MASQUE to HTTP/2 for you** instead of leaving you with a tunnel that connects and moves nothing. The URL is validated before use and reaches the engine through its environment, never as a command-line argument (any local app can read `/proc/<pid>/cmdline`, but not another process's environment).
-- **Match domain rules behind the tunnel** — *Advanced → Routing rules*, on by default, with a tunable wait window. On Android the app is always a TUN front end, so a flow used to reach the engine as a bare address and every domain rule in Block/Direct did nothing. The engine now reads the name from the TLS server name or the HTTP `Host` header of the first bytes and decides on that, while still connecting to the address the app asked for.
-- **Replace a refused identity** — *Advanced → Security & stability*, on by default. If Cloudflare stops accepting the saved device identity, the engine registers a fresh one instead of holding a tunnel that handshakes but carries no traffic.
-
-### 🚀 Engine upgraded to core v1.8.0
-
-The bundled core is <span dir="ltr">1.8.0</span>. It adds a warning when a SOCKS5 or HTTP listener is bound somewhere reachable from outside the device (it accepts every client without authentication — which is what LAN sharing does on purpose), a non-blocking HTTP proxy head read in place of a byte-at-a-time loop, hardened SOCKS5 authentication on the upstream-proxy dialer, and a fix for the tokio *"JoinHandle polled after completion"* panic that could take the process down while tearing a Gool (WARP-in-WARP) session apart.
-
-There are no new engine flags, so there is nothing new to set: `cli.rs` and `config.rs` are byte-identical to 1.7.0. The app's two manual-range patches were rebased onto the 1.8.0 sources and, apart from those `AETHER-APP-PATCH` blocks, the vendored tree is byte-identical to upstream. You can verify the engine you are running in **About → Engine (core) version**.
-
-### 🙋 About, reordered
-
-**About** in the side menu now opens on **this edition and its author** (the Android app, the GUI and the chained transports — `github.com/QW-AI-Code`), with the upstream Aether engine (Cluvex Studio) credited under it. The app version and the exact engine core version are both at the top.
-
-### 📦 Version
-
-**Version:** app <span dir="ltr">1.2.7</span>, version code <span dir="ltr">11</span>. The signing configuration is unchanged, so this installs straight over 1.2.5 from the same repository.
+---
 
 ## What's new in v1.2.5
 

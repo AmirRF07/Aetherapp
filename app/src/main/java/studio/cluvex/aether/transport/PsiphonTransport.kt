@@ -399,13 +399,54 @@ class PsiphonTransport(
 
     override fun onBytesTransferred(sent: Long, received: Long) = Unit
 
+    /**
+     * Psiphon notices that are pure bookkeeping and must never reach the log.
+     *
+     * ## ROOT CAUSE this fixes: the log could not show the bug
+     *
+     * The diagnostic log the user sends is a bounded 800-line ring. In the last
+     * one, **393 of 478 lines were Psiphon notices** and the overwhelming
+     * majority were `Info: {"message":"updated server <8 chars>"}` - one line per
+     * server entry in a routine list refresh, hundreds in a few seconds. The
+     * engine's own data-plane lines were 18 of 478, and the last of them was at
+     * second 51 of a six-minute session.
+     *
+     * That is why five rounds of analysis missed the real cause: **there was no
+     * data-plane telemetry in the window where the problem happens.** Every
+     * report had to be reconstructed from Psiphon's side effects. Dropping this
+     * noise is what makes the ring last a whole session and leaves room for the
+     * lines that actually describe the tunnel.
+     *
+     * Only unconditionally-useless notice shapes are listed. Anything carrying a
+     * diagnosis - errors, warnings, refusals, rotations, byte counts, port
+     * forward failures - is untouched, and [PsiphonHealth] still sees EVERY
+     * notice regardless, because it is fed before the filter.
+     */
+    private fun isNoiseNotice(message: String): Boolean =
+        message.startsWith("Info: ") && (
+            message.contains("\"message\":\"updated server ") ||
+                message.contains("\"message\":\"discarding server ") ||
+                message.contains("\"message\":\"ServerEntryIterator.reset") ||
+                message.contains("\"message\":\"Set dial parameters for ")
+            )
+
     override fun onDiagnosticMessage(message: String) {
-        ConnectionLog.record("Psiphon: $message")
-        // The notices carry the only authoritative count of refused port
-        // forwards ("port forward failures for <id>: <n>") and the id of the
-        // server carrying the session. See [PsiphonHealth].
+        // Health scoring reads the raw stream first: filtering is a LOG concern
+        // and must never change what the watchdog is allowed to see.
         PsiphonHealth.onNotice(message)
+        if (isNoiseNotice(message)) {
+            noiseNotices.incrementAndGet()
+            return
+        }
+        val suppressed = noiseNotices.getAndSet(0)
+        if (suppressed > 0) {
+            ConnectionLog.record("Psiphon: (+$suppressed routine server-list notices suppressed)")
+        }
+        ConnectionLog.record("Psiphon: $message")
     }
+
+    /** Routine notices dropped since the last line that reached the log. */
+    private val noiseNotices = java.util.concurrent.atomic.AtomicInteger(0)
 
     /**
      * Moves the session onto a different Psiphon server WITHOUT tearing the app's

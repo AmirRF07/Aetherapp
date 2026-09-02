@@ -1,6 +1,332 @@
+## 1.2.8-r8
+
+**Root cause of the upload stall: nothing on the app->network path was bounded in
+time, and the queue that held the upload was never measured.**
+
+The first r7 field log settles it. During an upload the uplink sustained
+107 KB/s, the latency probe measured a 7173 ms round trip against a 134 ms
+session floor - 7 seconds of pure queue - and at the same moment the uplink
+writer had waited 0 times, the device queue peaked at 2 of 64 packets, and
+`backpressure` and session `tail-drops` were both 0. So the queue was in none of
+the places r5, r6 and r7 clamped.
+
+It was in the three that are bounded only by a byte count - the shared `data_in`
+channel (1024 messages x up to 16 KB), `TcpState::pending` (256 KB) and the
+`Backlog` (512 KB) - plus the loopback legs of `PsiphonSocksFront`, which Android
+autotunes into the megabytes. A byte count is a latency bound only if you know
+the rate, and nothing here knew the rate: at 107 KB/s those queues add up to
+about **eight seconds**, in front of the ONE Psiphon SSH connection that carries
+the whole device.
+
+Then the flow went 9.4 s with nothing acknowledged, recovered 2.6 s inside r7's
+12 s reset deadline, and the session stayed connected and useless - uplink 6-18
+KB/s for three minutes while the badge read a healthy 140-260 ms - until the user
+reconnected by hand. Full analysis and log evidence in
+`docs/LIVE_STREAM_STALL_1.2.8-r8.md`.
+
+### Fixed - per-flow uplink admission, measured in time
+
+- Every flow carries a `FlowCredit`. The app may only have
+  `handed-to-the-stack - acknowledged-by-the-peer` bytes in the pipe, capped at
+  that flow's **own measured drain rate x 500 ms**, clamped to
+  `[48 KB, tcp_tx_buf()]`. Past it the SOCKS5 reader stops reading, so
+  backpressure crosses the loopback leg, reaches hev-socks5-tunnel and the TUN,
+  and ends up in the congestion window of the app doing the upload.
+- The rate is derived from r7's acknowledged-bytes signal, the only rate here a
+  dead path cannot fake. The floor is above this path's bandwidth-delay product
+  so admission can never be the throughput limit, and the ceiling is
+  `tcp_tx_buf()` so r8 can only ever remove queue that r6 already permitted.
+- Measured effect on the reported session: ~53 KB outstanding instead of
+  ~900 KB, i.e. ~0.5 s of standing queue instead of ~8 s.
+
+### Fixed - the loopback legs were the next hidden queue
+
+- `PsiphonSocksFront` pins `SO_SNDBUF`/`SO_RCVBUF` to 64 KB per direction on both
+  loopback legs. Without it the queue r8 squeezes out of the netstack simply
+  reappears in Android's loopback autotuning, which is the same mistake r6 found
+  on the WireGuard socket.
+
+### Fixed - a stall that self-recovers is no longer treated as a recovery
+
+- `TCP_DRAIN_STALL_TIMEOUT` 12 s -> 8 s. The observed stall was 9.4 s, so it now
+  ends in a reset, and in chained mode a reset costs one automatic Psiphon redial
+  instead of a manual disconnect and reconnect.
+- New `STALL_FLAP_LIMIT`: two stalls of >=3 s inside 60 s reset the flow even when
+  each one recovered on its own.
+
+### Fixed - the telemetry reported samples where it needed maxima
+
+- `[netstack]` gains `uplink peaks: outstanding N B, pending N B, socket N B,
+  budget N B`. `outstanding` and `pending` were never reported before, all three
+  are window high-water marks rather than end-of-window samples, and `budget`
+  states the rule admission is enforcing. `socket send-queue 3792 bytes` logged
+  in the same second as a 4803 ms probe is exactly the reporting gap this closes.
+
+Version stays 1.2.8 / versionCode 12. Patch level only.
+
+## 1.2.8-r7
+
+**Root cause of the live-stream / dubbing stall, after six rounds of misses.**
+
+The netstack measured flow liveness on the wrong event. `TcpState::last_progress`
+was refreshed whenever a socket *accepted* bytes into its send buffer, which only
+proves the socket agreed to remember them, not that the peer received anything.
+A flow whose peer had gone silent therefore looked healthy until its 128 KB send
+buffer was 100% full, and `reap_wedged` only ever considered flows in
+`backlog.blocked`, which such a flow never enters. The r6 field log shows the
+worst flow at exactly 131072 bytes queued emitting one packet in fifteen seconds
+with `backlog 0`, `backpressure 0`, `tail-drops 0` and no warning at all. The
+30 s wedge clock only started when the buffer saturated; it would have fired 14 s
+after the session ended.
+
+In a chained `Aether -> Psiphon` session Psiphon multiplexes the whole device
+over one SSH connection, so that single dead flow is every app on the phone:
+download collapses while upload trickles on keepalives, which is the reported
+symptom exactly.
+
+- Liveness is now derived from **acknowledged bytes**
+  (`accepted_total - send_queue()`), the only signal here that requires the far
+  end to have actually received data. A naive "did the send queue shrink" check
+  was rejected: a saturated upload pins its queue at the buffer limit and would
+  have been reset while working perfectly.
+- Non-draining flows are reported at 3 s and reset at 12 s, sized against the
+  session's measured 142-238 ms RTT.
+- `reap_wedged` now scans all flows, before the `backlog.blocked` early return
+  that made this case unreachable.
+- New `[netstack]` telemetry: `unacked-for <dur> (worst flow), N flow(s) not
+  draining` - distinguishes a deep queue that is moving from one that is dead.
+- Latency badge: r6 fixed the post-re-warm sample and left the steady-state one
+  unfiltered and unlogged, which is why the log only ever held 142-238 ms while
+  the screenshot showed 6442 ms. It now keeps a session floor, re-checks an
+  outlier once and reports the lower sample, and logs every reading.
+- r6's uplink `SO_SNDBUF` clamp is confirmed correct and live (`writer waited 0`
+  with the uplink peaking at 146 KB/s); it was simply not this bug.
+
+Version stays 1.2.8 / versionCode 12. Patch level only.
+
 # Changelog
 
+## 1.2.8-r6 - the uplink queue was in the kernel
+
+Version unchanged (**1.2.8**), patch level `1.2.8-r6`. Full analysis with log
+evidence in `docs/LIVE_STREAM_STALL_1.2.8-r6.md`.
+
+The r5 provenance work paid off: the field log is stamped `1.2.8-r5`, so for the
+first time every previous conclusion could be tested. They all came back negative
+- `backlog 0`, `tail-drops 0`, no starvation, no watchdog rotation, no teardown -
+on a session where a fresh dial cost 5694 ms and the badge read 3092 ms.
+
+### Fixed - ROOT CAUSE: a 7 MB kernel send buffer disabled every throttle above it
+
+- The 1.2.8 media-stall fix set `SO_RCVBUF` **and** `SO_SNDBUF` from one figure, so
+  every WireGuard socket got a 7 MB send buffer (two of them in series in gool
+  mode). `send()` on a datagram socket is only backpressure when that buffer is
+  full, and 7 MB never is - so the writer never waited, the mpsc never filled,
+  `StackDevice.tx` never reached its gate, `transmit()` never refused, and CUBIC
+  was still being shown an infinite, lossless link. `backpressure 0` on all 96
+  telemetry lines of the r5 log was the receipt, not a clean bill of health.
+- `sysprofile` splits the figure: receive stays generous (that half was right and
+  it prevents real loss), send becomes a latency budget - 128 KB on a high tier,
+  ~250 ms of a mobile uplink, down from 7 MB. A kernel that refuses to shrink it
+  now logs a WARN instead of silently restoring the bug.
+- The WireGuard writer uses `try_send` + `writable()`, so a full uplink is a timed,
+  counted wait that propagates all the way to the congestion window.
+- Netstack TCP send buffer 512 KB -> 128 KB. In chained mode the whole device rides
+  ONE flow (`tcp flows=1`), and 512 KB in front of it is ~10 s of a live dubbing
+  uplink.
+
+### Fixed - the telemetry was pointed at the wrong side of a syscall
+
+- New `[uplink <peer>]` line per tunnel per 15 s: packets, KB/s, the granted
+  `SO_SNDBUF`, and how often and how long the writer had to wait. This is the
+  measurement that was missing in r2, r3, r4 and r5.
+- `[netstack]` gains `socket send-queue N bytes (worst flow M)` - what smoltcp has
+  accepted but not yet put on the wire. `backlog` (always 0) is what has not been
+  handed to a socket. Together they separate "nothing to send" from "cannot send".
+
+### Fixed - the latency badge reported its own dial as the ping
+
+- The first round trip on a just-re-warmed session rides a connection whose
+  handshake was itself queued. The r5 log: `setup 5694 ms, round trip 3092 ms`,
+  then 35 s later `setup 327 ms, round trip 191 ms` on the same path. r6 takes a
+  confirming sample and reports the lower of the two, logging both - the gap
+  between them is the uplink queue depth.
+
+### Fixed - the same CI time bomb r5 found, in three more files
+
+- `sync-core.sh` discovers app patches from `AETHER-APP-PATCH` markers and deletes
+  everything else on a core upgrade. `upstream.rs`, `quic.rs` and `wireguard.rs`
+  carried no markers and now hold the r6 fix, so the first upstream release would
+  have removed it with a green build. All three are now wrapped.
+
+## 1.2.8-r3 - live-stream stall, root-caused
+
+Version unchanged (**1.2.8**). Full analysis with log evidence in
+`docs/LIVE_STREAM_STALL_1.2.8-r3.md`; it also documents why the r2 diagnosis was
+wrong.
+
+### Fixed - the app was tearing down its own working session
+
+- Watchdog and latency probes dialled anycast resolvers on **TCP/53**, a port a
+  large share of Psiphon exits refuse. Every check therefore failed on a healthy
+  tunnel. Probes now do a real TLS handshake on **443**.
+- A failed probe could rebuild the whole session on its own. It now also requires
+  the tunnel core's byte counters to be flat: a path moving traffic is not wedged.
+  The r2 log tore down a session that had moved 703 KB.
+- The pipeline probe raced `PsiphonHealth`'s deliberate exit rotation and killed
+  the session 3.9 s into the repair. It now stands down while a rotation settles.
+- Probe destinations are registered as self-probes and can no longer count as
+  evidence that an exit filters, so the app cannot trigger its own rotations
+  (which drop udpgw and kill every UDP/QUIC flow on the device).
+- The latency badge tries three endpoints before reporting an error.
+
+### Fixed - the engine serialised uploads against downloads, per packet
+
+- The WireGuard send task took the boringtun session lock once per packet, against
+  the socket reader doing the same. Harmless on a download, fatal on a symmetric
+  live stream: every packet cost a scheduler round trip. Bursts are now
+  encapsulated under one acquisition (`MAX_ENCAP_BATCH = 64`), with no added
+  latency.
+- The one-shot `obf_sent` mutex is no longer taken for every outbound datagram.
+
+### Fixed - netstack starvation telemetry cried wolf
+
+- The `select!` arm receiving `data_in_rx` did not count as app->network progress,
+  and the report triggered on a single inbound packet. r2 therefore reported
+  32-second upload stalls on idle tunnels. The signal now requires a genuinely
+  busy download direction and a non-empty backlog.
+
+## 1.2.8-r2 - live two-way streams no longer starve the tunnel
+
+Fix pass inside 1.2.8; the version stays **1.2.8**. Full analysis:
+`docs/LIVE_STREAM_STALL_1.2.8-r2.md`.
+
+- **netstack: the app->network path was starved by any sustained download.** The
+  run loop's `select!` was `biased` with inbound first, so while packets kept
+  arriving the upload arm and the open-a-flow arm were never polled at all. One
+  18-minute field log: 115 MB received against 6 MB sent, with a symmetric live
+  dubbing session running the whole time. Every queue now gets its own per-pass
+  budget and the visit order alternates; `select!` is only reached when all of
+  them are empty.
+- **netstack: starvation is now reported** in one log line instead of having to
+  be inferred from a byte ratio.
+- **Psiphon front: one udpgw port forward, not two.** A Psiphon tunnel holds only
+  the newest one, so the DNS and bulk lanes added in 1.2.7-r3 evicted each other
+  219 times in 18 minutes (218 of 218 consecutive dials alternated lane). DNS is
+  prioritised inside the single stream instead. udpgw dials are rate-limited with
+  exponential backoff and counted.
+- **Bufferbloat: the packet handoff queues were application-sized.** 1024 packets
+  per direction plus 2048 retained is several seconds of standing local queue on
+  a mobile uplink. Capped at 256; throughput is set by smoltcp's socket buffers,
+  so nothing is lost but the delay.
+
+## 1.2.8
+
+### Fixed - the mid-video stall, at the root (`docs/MEDIA_STALL_1.2.8.md`)
+
+Reported symptom: `Aether -> Psiphon` connects and browses fine for about a
+minute; a YouTube video then pins the ping at ~2000 ms and the session stops
+carrying anything at all - not the video, not any other site - while the app,
+both stages and every local port stay up. Only a manual disconnect/reconnect
+recovered it. The same freeze occurred on plain `Aether`, which is what located
+the fault: everything the two modes share is the engine's data plane.
+
+Five defects, all on that shared path, all now fixed.
+
+- **An expired WireGuard session was ignored instead of being replaced.**
+  `Tunn::update_timers` reports "this session is finished" exactly once, and the
+  timer task pattern-matched only the `WriteToNetwork` arm - the report went in
+  the bin. From that moment `encapsulate` refused every packet (a `trace!` line
+  each), so the tunnel object, the netstack and the SOCKS5 listener were all
+  alive and healthy around a crypto session that was dead. That is the freeze,
+  and it was permanent by construction. The engine now carries the peer's keys
+  with the session and **re-handshakes in place on the same socket** - the
+  netstack, the listener and Psiphon's upstream never even notice. Both the send
+  path (a run of refused packets) and the health task (a quiet data plane) can
+  ask for it, rate-limited to one attempt every 3 s.
+- **One stalled connection froze every other connection.** The netstack's run
+  loop kept a single global deferred queue and gated its only app-data intake on
+  it - `data_in_rx.recv(), if deferred.is_empty()`. A flow whose peer stopped
+  reading therefore blocked the writes of every other flow, DNS included. The
+  backlog is now ordered **per flow**: a stuck flow queues behind itself and
+  nobody else waits. A flow that accepts nothing for 30 s is reset, and TCP
+  keep-alive plus a dead-peer timeout are set on every socket so a black-holed
+  connection can no longer live for the length of the session.
+- **The tunnel's UDP sockets never got the buffers the app sized for them.**
+  `sysprofile` has been computing them (and logging "udp socket buffer=7168KB")
+  since 1.2.5, but only the QUIC/MASQUE path applied it: the entire WireGuard
+  and gool data plane ran on the OS default. That is a few milliseconds of a 4K
+  stream, so the first time the reader was late the kernel began discarding
+  datagrams - including the handshake replies the session needed to survive.
+- **The socket readers could park indefinitely.** Both the WireGuard reader and
+  the gool relay handed packets on with an unbounded `send().await`, so a busy
+  netstack made the *only* reader of the socket go deaf, which caused the loss
+  in the point above. Handoff is now bounded at 20 ms: late is fine, deaf is not.
+- **A congested burst was shredded, not held.** `flush_tx` dropped every
+  remaining packet the moment the writer's channel was full. It now holds the
+  burst and retries 2 ms later, tail-dropping only past a real queue limit -
+  which is where the 2000 ms ping came from in the first place.
+- **The watchdog could not see any of this.** Its probe was a bare SOCKS5
+  `connect()`, and a connect is answered by the accept path, not the data path:
+  a wedged tunnel passed every check forever, which is why nothing ever healed
+  by itself. The probe now completes a real **DNS round trip** and requires a
+  valid answer. A chained session, which previously only checked "is the Psiphon
+  library still running?", now gets the same end-to-end probe aimed at the
+  pipeline's own listener every 15 s and rebuilds itself after two dead
+  readings.
+- **A congestion spike no longer counts as a dead peer.** The data-plane stale
+  timeout went from 10 s (shorter than a bad mobile path stalls on its own, so a
+  video's first spike tore down a perfectly good gool session, both hops, and
+  charged the user a rescan) to 20 s, with two confirmations, and an in-place
+  re-handshake attempted at half that.
+
+### Changed
+- Version 1.2.8, versionCode 12.
+- Watchdog cadence 30 s -> 15 s, failure threshold 3 cycles -> 2: the probe now
+  proves something, so it can act sooner. Probe timeout 8 s -> 5 s.
+
+
 ## 1.2.7
+
+### Fixed (app-connectivity pass, version unchanged - `1.2.7-r3` in code comments)
+See `docs/PSIPHON_APP_CONNECTIVITY.md` for the full analysis.
+- **AI apps, CapCut and the browsers work in `Aether -> Psiphon` again.** Three
+  black holes were reported as "you have no internet" by every app that will not
+  fall back from HTTP/3, and the reporter's own control experiment named them: the
+  same session, USB-tethered to a laptop, opens Gemini instantly - because a
+  tether path is TCP-only and IPv4-only.
+- **UDP/443 is carried again** (`CARRY_QUIC`). r2 dropped it silently, and SOCKS5
+  `UDP ASSOCIATE` cannot return an ICMP port-unreachable, so a dropped datagram is
+  indistinguishable from a dead link. r2's two real mechanisms are fixed at source
+  instead: **DNS now has its own udpgw stream** (a priority queue could not help,
+  because the blocking happens in the kernel send buffer below it), and the bulk
+  lane **drops rather than buffers**, which is exactly the loss signal QUIC's
+  congestion control needs. A self-expiring breaker still suppresses UDP/443 for
+  60 s under a genuine storm.
+- **The device is no longer told it has IPv6 by an IPv4-only exit.** A chained
+  session's TUN carries no IPv6 *address* while still routing `::/0`, so Android's
+  own resolver filters AAAA per-network and every app settles on IPv4 - and the
+  front answers AAAA with an empty NOERROR once the exit has proven it cannot dial
+  IPv6. That proof is now obtained up front, once, instead of being paid for by the
+  first two app flows of every session (65 refused IPv6 flows in one two-minute log).
+- **The sanctions page is gone.** `::/0` is routed unconditionally in a chained
+  session: an uncaptured IPv6 flow left with the phone's real address, so the site
+  answered with a country block while the app still said Connected.
+- **"Only Telegram and Instagram open" was name resolution.** The udpgw dial ran on
+  the datagram pump thread, holding a lock every association needed - the pump is
+  the only reader of the forwarder's UDP socket, so UDP stopped for the whole
+  device, DNS included, for the length of the dial. Dialling moved to its own pool,
+  both lanes are pre-warmed before the TUN comes up, and the DNS-over-HTTPS
+  fallback now pools and reuses connections instead of paying a port forward plus a
+  TLS handshake per name.
+- **A SOCKS handshake can no longer hang forever.** `openPsiphonStream` read it with
+  no timeout at all, so a listener that accepted and never answered parked the
+  caller for the life of the session.
+- **A refused TCP/853 is named in the log.** That is where Android's Private DNS
+  goes; in strict mode there is no fallback, so the device resolves nothing while
+  the tunnel is healthy. Not counted as censorship.
+- `hev.yaml`: `udp-read-write-timeout` 60000 -> 120000, because a live QUIC
+  connection legitimately idles now.
 
 ### Fixed (stability pass, version unchanged)
 - **The app no longer disconnects itself while healing a bad exit server.**
@@ -402,3 +728,12 @@ the port the finished pipeline exposes instead of stage 1's listener.
 - The persisted diagnostics log no longer records per-flow destinations (partial browsing history)
   or the engine's argv values (Zero Trust team name, pinned gateways, resolvers, routing rules).
 - Unsynchronised iteration of a shared flow map fixed.
+
+## 1.2.8-r5
+
+- **Root cause of the r4 round: the r4 build was never tested.** Five independent strings in the field log belong to the r3 engine and Kotlin. See docs/LIVE_STREAM_STALL_1.2.8-r5.md.
+- **Build identity added end to end.** PATCHLEVEL -> build.rs stamp inside libaether.so -> verified by build-natives.sh on the stripped .so -> verified again by CI inside the packaged APK -> cross-checked at runtime by BuildProvenance -> shown in the About card. versionName stays 1.2.8.
+- **CI could no longer silently revert engine patches.** sync-core.sh discovers patched files from AETHER-APP-PATCH markers instead of a hand-written list (which omitted Cargo.toml, netstack.rs, sysprofile.rs and build.rs), and a patch that cannot be rebased now fails the build.
+- **Netstack device backpressure (root cause #2).** StackDevice::transmit() returned Some() unconditionally over an unbounded queue, so every drop happened after smoltcp had recorded the packet as sent and was invisible to the congestion controller r4 enabled. transmit() now refuses at MAX_DEVICE_TX and flush_tx holds bursts instead of shredding one packet per pass.
+- **MAX_BACKLOG_BYTES 8 MB -> 512 KB**; **first netstack telemetry line at 2 s** with device queue peak and backpressure counters.
+- **Hard RTT floor on endpoint selection**: a discarded cached endpoint is kept when the scan fails to beat it, so rejecting a 396 ms cache can no longer land on a 475 ms replacement.

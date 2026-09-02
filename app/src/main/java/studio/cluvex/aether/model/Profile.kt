@@ -434,6 +434,17 @@ data class ConnectionProfile(
                 "AETHER_QUICK_RECONNECT_MAX_HANDSHAKE_MS",
                 if (chainedStage) CHAINED_HANDSHAKE_BUDGET_MS else DIRECT_HANDSHAKE_BUDGET_MS,
             )
+            // 1.2.8-r4: the SAME budget now also gates the SCAN's own result.
+            // Until this existed the engine enforced the budget on the cached
+            // endpoint only, so it would reject a 397 ms cache as too slow and
+            // then commit the session to the first thing that answered the scan -
+            // 475 ms, 79 ms WORSE than what it had just thrown away, while
+            // 104-115 ms edges had been measured on those ranges in the same
+            // second. See `good_rtt_budget` in the engine's `wg_prober.rs`.
+            put(
+                "AETHER_SCAN_GOOD_RTT_MS",
+                if (chainedStage) CHAINED_RTT_BUDGET_MS else DIRECT_RTT_BUDGET_MS,
+            )
         }
 
         // SECURITY: an upstream proxy URL can carry a username and password, so

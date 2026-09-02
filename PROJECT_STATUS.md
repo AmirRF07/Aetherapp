@@ -1,7 +1,7 @@
 # Final package status
 
-- Version: 1.2.7 (unchanged)
-- Base versionCode: 11
+- Version: 1.2.8
+- Base versionCode: 12
 - Backends: Aether, Aether -> Psiphon (chained). The Tor backend and the chained
   Aether -> Tor mode were removed in this revision, together with the whole Tor
   runtime.
@@ -12,3 +12,5 @@
 - Architectures: arm64-v8a, armeabi-v7a
 - Archive integrity: SOURCE_MANIFEST.sha256
 - Security audit (1.2.7, UI pass 2): docs/SECURITY_AUDIT_1.2.7.md
+- Media-stall root cause analysis (1.2.8): docs/MEDIA_STALL_1.2.8.md
+- Upload-stall root cause analysis (1.2.8-r8): docs/LIVE_STREAM_STALL_1.2.8-r8.md

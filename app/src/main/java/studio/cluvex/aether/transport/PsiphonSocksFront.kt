@@ -82,15 +82,18 @@ import javax.net.ssl.SSLSocketFactory
  * connection id, exactly as badvpn's `SocksUdpGwClient` does. The framing is
  * byte-identical to what the Psiphon server already speaks.
  *
- * ### One protocol is deliberately NOT carried: QUIC
+ * ### QUIC is carried, prioritised inside that one stream
  *
- * udpgw is ONE TCP stream for the whole device. A video stream on UDP/443 both
- * head-of-line-blocks every DNS query behind it AND melts down against the
- * tunnel's own congestion control, which is exactly where "the ping goes over
- * 1000 and everything stops the moment a video plays" came from. UDP/443 is
- * therefore dropped from the first datagram, so browsers and the YouTube player
- * fall straight back to HTTP/2 over TCP where every flow gets its own Psiphon
- * channel with its own flow control. See [SUPPRESS_QUIC].
+ * 1.2.7-r2 dropped UDP/443 outright, because one shared udpgw stream let a video
+ * flow head-of-line-block every DNS query behind it and melt down against the
+ * tunnel's own congestion control. That protected the tunnel and broke every app
+ * that will not fall back from HTTP/3 - Gemini, ChatGPT, CapCut, TikTok. r3 then
+ * gave DNS a SECOND udpgw stream, which a Psiphon tunnel cannot hold at the same
+ * time as the first: the two evicted each other 219 times in 18 minutes (see
+ * [UdpgwLane]). 1.2.8-r2 keeps ONE stream and does the prioritising in the one
+ * place that works - a priority lane in front of a single non-blocking writer
+ * thread ([UDPGW_PRIORITY_QUEUE]) - while bulk frames DROP rather than buffer so
+ * QUIC's congestion controller sees the loss and backs off. See [CARRY_QUIC].
  *
  * ### And a fallback, because a server may refuse the intercept
  *
@@ -152,14 +155,53 @@ object PsiphonSocksFront {
     private const val REP_CMD_NOT_SUPPORTED = 7
 
     /**
-     * The port QUIC / HTTP-3 uses. Singled out because UDP on this port is what
-     * made this mode collapse during video playback - see [SUPPRESS_QUIC] and
-     * `docs/PSIPHON_MEDIA_STALL.md`.
+     * The port QUIC / HTTP-3 uses. Singled out because it is both what made this
+     * mode collapse during video playback and what the AI apps refuse to work
+     * without - see [CARRY_QUIC] and `docs/PSIPHON_MEDIA_STALL.md`.
      */
     private const val QUIC_PORT = 443
 
     private const val RELAY_BUFFER = 32 * 1024
+
+    /**
+     * `SO_SNDBUF` / `SO_RCVBUF` for the two loopback legs this front sits on.
+     *
+     * ## 1.2.8-r8. Why a loopback socket needs a buffer limit at all
+     *
+     * The engine's netstack now admits app->network data against the rate the
+     * peer is actually acknowledging (`FlowCredit`, `netstack.rs`), so an upload
+     * can no longer park ~8 seconds of queue inside it. Backpressure has to land
+     * SOMEWHERE, and without this it lands here: the two legs of this front
+     *
+     *   hev-socks5-tunnel -> [client]  ->  this front  ->  [upstream] -> Psiphon
+     *
+     * are ordinary TCP sockets, and Android autotunes a loopback socket's buffers
+     * into the megabytes because on loopback that costs nothing and gains
+     * throughput. It gains nothing here - the far side of this relay is a mobile
+     * uplink - and what it actually does is re-create the exact queue r8 just
+     * removed one layer higher up, where no counter in this project can see it.
+     *
+     * That is not a hypothetical: it is the same mistake, in a different kernel
+     * buffer, that r6 found on the WireGuard socket (`SO_SNDBUF` 7 MB, so the
+     * writer never waited and every throttle above it was decorative).
+     *
+     * 64 KB per direction per leg is ~0.6 s at the 107 KB/s the field log
+     * measured, and a relay that copies in [RELAY_BUFFER] chunks still saturates
+     * loopback at gigabytes per second, so nothing is lost by bounding it.
+     */
+    private const val LOOPBACK_QUEUE = 64 * 1024
     private const val PSIPHON_CONNECT_TIMEOUT_MS = 30_000
+
+    /**
+     * How long Psiphon's local SOCKS listener may take to answer a CONNECT.
+     *
+     * Bounded because the handshake used to be read with no timeout at all, and a
+     * listener that accepts but never replies then parked the calling thread for
+     * the life of the session - a udpgw lane that never came up, or a DNS worker
+     * gone for good. Generous, because the reply only arrives once Psiphon has
+     * actually opened the channel through the tunnel.
+     */
+    private const val PSIPHON_HANDSHAKE_TIMEOUT_MS = 20_000
     private const val DNS_TIMEOUT_MS = 10_000
     private const val DNS_BUFFER = 4096
 
@@ -172,9 +214,35 @@ object PsiphonSocksFront {
      * is the entire point: it removes the last way for name resolution to fail in
      * this mode.
      */
-    private const val DOH_HOST = "cloudflare-dns.com"
+    private val DOH_HOSTS = listOf("cloudflare-dns.com", "dns.google")
     private const val DOH_PORT = 443
     private const val DOH_PATH = "/dns-query"
+
+    /**
+     * How long an idle DoH connection may be reused. 1.2.7-r3.
+     *
+     * ## ROOT CAUSE this fixes (the "only Telegram and Instagram open, browsers
+     * open nothing" report)
+     *
+     * The r2 fallback sent `Connection: close` and therefore paid a **full TCP
+     * port forward plus a full TLS handshake through the tunnel for EVERY SINGLE
+     * name lookup**. Through a chained Aether -> Psiphon session that is 1-3 s
+     * per lookup, and only [DNS_POOL_SIZE] of them can be in flight at once. A
+     * cold page load wants twenty to thirty names, so the browser times out
+     * before its first request is even addressed - while Telegram (hard-coded
+     * datacentre IPs, no DNS at all) and an already-warm Instagram keep working.
+     * That is the exact signature the report describes, on every ISP, because it
+     * has nothing to do with the ISP.
+     *
+     * Connections are pooled and reused instead: one warm connection answers a
+     * whole page load in one round trip per name. Cloudflare and Google both keep
+     * an idle DoH connection for about a minute, so this is comfortably inside
+     * what the resolver allows.
+     */
+    private const val DOH_IDLE_MS = 45_000L
+
+    /** Warm DoH connections kept for reuse. Matches a page load's name fan-out. */
+    private const val DOH_POOL_MAX = 6
     private const val UDP_BUFFER = 8192
     private const val UDP_POLL_MS = 1_000
 
@@ -202,39 +270,65 @@ object PsiphonSocksFront {
     private const val UDPGW_KEEPALIVE_MS = 20_000L
 
     /**
-     * Do NOT carry QUIC (UDP/443) over udpgw.
+     * QUIC (UDP/443) IS carried again. 1.2.7-r3.
      *
-     * ## ROOT CAUSE this fixes (the "video makes the ping jump over 1000 ms and
-     * everything stops" report)
+     * ## ROOT CAUSE this replaces (the "the app says you have no internet" report)
      *
-     * udpgw is ONE TCP port forward for the WHOLE device, and every UDP flow is
-     * multiplexed onto it. That is fine for DNS-sized datagrams and it is what
-     * badvpn does. It is catastrophic for a video stream:
+     * 1.2.7-r2 dropped every UDP/443 datagram from the first packet, on the
+     * theory that the client falls back to HTTP/2 over TCP. Browsers do. **The
+     * apps people actually complained about do not.**
      *
-     *  - **Head-of-line blocking.** A 4 Mbit/s QUIC flow and every DNS query the
-     *    device makes share one byte stream. While a video segment is in the
-     *    write queue, name resolution is stuck behind it. That alone explains a
-     *    four-figure ping the moment playback starts.
-     *  - **Congestion control fighting itself.** QUIC runs its own loss-based
-     *    congestion control, and a reliable TCP tunnel HIDES loss from it. So
-     *    QUIC keeps opening its window, the tunnel keeps buffering, and the RTT
-     *    inflates without bound until the player's own timers give up. This is
-     *    the classic TCP-over-TCP meltdown, and no amount of tuning inside this
-     *    class fixes it, because the transport underneath is the wrong shape for
-     *    the traffic.
+     *  - Gemini, ChatGPT and every other Cronet / `TTNet` based app pins HTTP/3
+     *    for its own origins and reads a **black hole** - datagrams that vanish
+     *    with no signal whatsoever - as "this network has no internet", which is
+     *    literally the error text the user sees. SOCKS5 `UDP ASSOCIATE` has no
+     *    way to return an ICMP port-unreachable, so a silent drop is
+     *    indistinguishable from a dead link and the app reports it as one.
+     *  - CapCut's effect/template CDN and TikTok's feed are QUIC-first in
+     *    practice: the app opens and its content never arrives.
+     *  - The field log confirms the shape of it - `udp/443 (QUIC) dropped=48,
+     *    IPv6 flows refused locally=65` in a two-minute session whose entire
+     *    purpose was opening Gemini - and so does the reporter's own control
+     *    experiment: the SAME session, USB-tethered to a laptop, opens
+     *    `gemini.google.com` immediately, because a tether path is TCP-only and
+     *    IPv4-only and therefore never touches either black hole.
      *
-     * Dropping UDP/443 from the FIRST datagram makes every browser and the
-     * YouTube player fall straight back to HTTP/2 over TLS, where each flow gets
-     * its OWN Psiphon channel with its own flow control - which is exactly the
-     * shape this tunnel is good at. Consistency is the point: intermittently
-     * working QUIC is far worse than QUIC that never works, because Chromium
-     * caches "HTTP/3 works for this origin" and then spends seconds per request
-     * waiting for a handshake that a rotated server has silently black-holed.
+     * ## Why carrying it is safe now (r2's meltdown is fixed at its source)
      *
-     * DNS, and every other UDP protocol (VoIP, game traffic, NTP), still ride
-     * udpgw untouched.
+     * r2 was right about the mechanism and wrong about the cure. Both failure
+     * modes are addressed where they actually live:
+     *
+     *  - **Head-of-line blocking** came from every frame being written straight
+     *    from the datagram pump under one lock, so a congested tunnel blocked the
+     *    only reader of the forwarder's UDP socket and UDP stopped device-wide.
+     *    The pump now only enqueues; a dedicated writer thread does the blocking
+     *    I/O; DNS rides a priority queue in front of it and bulk frames are
+     *    dropped oldest-first at [UDPGW_BULK_QUEUE]. r3 tried to solve this with
+     *    a second port forward instead and made it far worse - see [UdpgwLane].
+     *  - **Congestion control fighting itself** came from a reliable tunnel
+     *    hiding loss from QUIC. The bulk lane's queue is bounded and **drops**
+     *    rather than buffers ([UDPGW_BULK_QUEUE]), which is precisely the loss
+     *    signal QUIC's congestion controller needs: it backs off instead of
+     *    inflating the RTT without bound.
+     *  - And if it degrades anyway, [noteBulkDrop] trips a breaker: UDP/443 is
+     *    suppressed for [QUIC_COOLDOWN_MS] and re-enabled automatically. r2's
+     *    protection, without permanently breaking the apps.
      */
-    private const val SUPPRESS_QUIC = true
+    private const val CARRY_QUIC = true
+
+    /**
+     * Bulk-lane drops inside [QUIC_TRIP_WINDOW_MS] that trip the QUIC breaker.
+     *
+     * A handful of drops is the bounded queue doing its job - QUIC reads them as
+     * congestion and slows down, which is the entire design. A sustained storm
+     * means this tunnel cannot carry the flow at all, and then suppressing
+     * UDP/443 for a cooldown really is better for the rest of the device.
+     */
+    private const val QUIC_TRIP_DROPS = 96L
+    private const val QUIC_TRIP_WINDOW_MS = 10_000L
+
+    /** How long UDP/443 stays suppressed once the breaker trips. Self-expiring. */
+    private const val QUIC_COOLDOWN_MS = 60_000L
 
     /**
      * Frames the udpgw writer may hold before it starts dropping.
@@ -249,6 +343,22 @@ object PsiphonSocksFront {
 
     /** Priority (DNS + keepalive) frames queued before dropping. Never reached in practice. */
     private const val UDPGW_PRIORITY_QUEUE = 512
+
+    /**
+     * Minimum gap between two udpgw dials, and the ceiling the backoff grows to.
+     *
+     * 1.2.8-r2: a dial is an SSH channel open across every hop of the pipeline.
+     * Retrying it on the next datagram - which is what "dial when there is no
+     * live session" degenerates into when the dial keeps failing - turns a dead
+     * udpgw into a self-inflicted flood. The gap is short enough that a real
+     * recovery is invisible to the user and long enough that a refusing server
+     * costs one channel every few seconds instead of hundreds.
+     */
+    private const val UDPGW_DIAL_MIN_GAP_MS = 400L
+    private const val UDPGW_DIAL_MAX_GAP_MS = 5_000L
+
+    /** Dials per session that get logged individually before the log goes quiet. */
+    private const val UDPGW_DIAL_LOG_BUDGET = 8L
 
     /**
      * IPv6 dials allowed to fail before IPv6 is declared dead for this exit.
@@ -271,6 +381,31 @@ object PsiphonSocksFront {
      */
     private const val IPV6_PROBE_BUDGET = 2
 
+    /**
+     * Where the up-front IPv6 capability probe dials. 1.2.7-r3.
+     *
+     * ## ROOT CAUSE this fixes
+     *
+     * [IPV6_PROBE_BUDGET] only latches the verdict AFTER two real app flows have
+     * already been sent to their deaths, and the counter is reset on every
+     * connect and every rotation. In practice that means the first seconds of
+     * every session - exactly when an app is being opened and is deciding whether
+     * this network works - are spent proving something that is true of nearly
+     * every Psiphon exit. The field log shows the bill: 65 IPv6 flows refused in
+     * one two-minute session.
+     *
+     * So the verdict is now established BEFORE any app traffic, once, on a
+     * background thread, against an address that is always up (Cloudflare's
+     * public resolver on 443). An explicit SOCKS refusal is proof and latches
+     * immediately; no answer at all is inconclusive and leaves the optimistic
+     * assumption in place for [noteIpv6Refusal] to settle.
+     */
+    private const val IPV6_PROBE_TARGET = "2606:4700:4700::1111"
+    private const val IPV6_PROBE_PORT = 443
+
+    /** DNS `QTYPE` for AAAA. See [isAaaaQuery]. */
+    private const val DNS_TYPE_AAAA = 28
+
     private val running = AtomicBoolean(false)
 
     /**
@@ -290,10 +425,100 @@ object PsiphonSocksFront {
     @Volatile private var connPool: ExecutorService? = null
     @Volatile private var dnsPool: ExecutorService? = null
 
-    /** Null until the first UDP flow, then a live session or a remembered refusal. */
-    @Volatile private var udpgw: UdpgwSession? = null
+    /**
+     * THE udpgw stream. Exactly one, for the whole device.
+     *
+     * ## ROOT CAUSE this fixes (1.2.8-r2) - the udpgw ping-pong
+     *
+     * 1.2.7-r3 opened TWO port forwards to the udpgw address, one for DNS and
+     * one for bulk UDP, so that a saturated video flow could not head-of-line
+     * block a name lookup in the kernel send buffer. The reasoning was sound and
+     * the result was a disaster, because **a Psiphon tunnel carries exactly one
+     * udpgw port forward**: opening the second one tears the first one down.
+     *
+     * The field logs prove it beyond argument. Over 18 minutes, `loge1` contains
+     * 219 "stream up" lines and 220 "session closed" lines, and every single one
+     * of the 218 consecutive pairs of "stream up" lines ALTERNATES lane:
+     *
+     * ```
+     *   +bulk  -  +dns  -  -  +bulk  +dns  -  +bulk  -  -  +dns  -  +bulk ...
+     * ```
+     *
+     * Two independent, merely congested streams cannot produce a perfect
+     * alternation 218 times in a row. Two mutually exclusive ones cannot produce
+     * anything else: each lane's dial killed the other lane, whose next datagram
+     * re-dialled it, which killed the first. Under load that ran at up to 48
+     * re-dials a minute, and each one costs a full SSH channel open across BOTH
+     * hops of a chained session (~300-900 ms here).
+     *
+     * The consequences are exactly the report:
+     *  - for most of the session there was no live udpgw stream, so every
+     *    non-DNS datagram was silently DROPPED (QUIC, WebRTC, VoIP, games) and
+     *    every lookup fell back to the slow DNS-over-HTTPS path;
+     *  - the constant channel churn is itself load on the tunnel it is trying to
+     *    use, which is where a large part of the 2000 ms came from.
+     *
+     * So: one stream. DNS is protected the way r2 intended - a **priority queue
+     * inside the session** ([UDPGW_PRIORITY_QUEUE]) that a saturated bulk flow
+     * cannot get in front of, plus a bounded, oldest-first bulk queue
+     * ([UDPGW_BULK_QUEUE]) so the writer thread never parks. That is the layer
+     * where prioritisation actually works, because there is exactly one socket
+     * to prioritise onto and one writer feeding it.
+     */
+    private class UdpgwLane(val label: String) {
+        @Volatile var session: UdpgwSession? = null
+
+        /** True while a dial is in flight, so it is dialled once, not once per datagram. */
+        val dialing = AtomicBoolean(false)
+        val lock = Any()
+
+        /** Monotonic ms before which no new dial may be attempted. */
+        @Volatile var nextDialAt: Long = 0
+
+        /** Consecutive failed dials, for the backoff. Reset on success. */
+        val failures = AtomicInteger(0)
+
+        /** Total dials this session, so churn shows up in the log if it ever returns. */
+        val dials = AtomicLong(0)
+    }
+
+    /**
+     * The one and only udpgw lane. Kept as a class rather than inlined so the
+     * dial/backoff bookkeeping stays in one place.
+     */
+    private val udpLane = UdpgwLane("udp")
+
+    /**
+     * The server refused to intercept the udpgw address.
+     *
+     * A property of the SERVER, not of the stream, so it is not re-earned once
+     * per datagram.
+     */
     private val udpgwRefused = AtomicBoolean(false)
-    private val udpgwLock = Any()
+
+    /**
+     * Where udpgw streams are dialled and where the IPv6 probe runs.
+     *
+     * ## ROOT CAUSE this fixes (device-wide UDP stalls, "browsers open nothing")
+     *
+     * The old `udpgwSession()` dialled Psiphon **on the datagram pump thread**,
+     * holding a lock every other association's pump needed. The pump is the only
+     * reader of the forwarder's UDP socket, so for as long as that dial took -
+     * and a SOCKS handshake against an unhappy tunnel could take the full connect
+     * budget - **UDP stopped for the whole device, DNS included**. That is the
+     * same class of bug r2 fixed for the udpgw WRITER and missed for the dial.
+     *
+     * Dialling moved off the pump entirely. A pump that finds no live lane gets
+     * `null` immediately: DNS falls through to the resolver path (which answers
+     * it for real, over the tunnel), non-DNS UDP loses a datagram, and the lane
+     * comes up in the background a few hundred milliseconds later.
+     */
+    @Volatile private var dialPool: ExecutorService? = null
+
+    /** Set while UDP/443 is suppressed by [noteBulkDrop]'s breaker. Monotonic ms. */
+    private val quicSuppressedUntil = AtomicLong(0)
+    private val bulkDropWindowStart = AtomicLong(0)
+    private val bulkDropsInWindow = AtomicLong(0)
 
     /**
      * False once this exit has proven it cannot dial IPv6 ([IPV6_PROBE_BUDGET]
@@ -316,15 +541,19 @@ object PsiphonSocksFront {
      */
     private val dnsPort53Refused = AtomicBoolean(false)
 
+    /** Latched once TCP/853 (Android Private DNS) has been refused. Logged once. */
+    private val privateDnsBlocked = AtomicBoolean(false)
+
     /** Session counters for the diagnostics panel; cheap and worth having. */
     private val quicDropped = AtomicLong(0)
     private val bulkUdpDropped = AtomicLong(0)
     private val ipv6Refused = AtomicLong(0)
+    private val aaaaSuppressed = AtomicLong(0)
 
     val isRunning: Boolean get() = running.get()
 
     /** True when UDP is riding a real udpgw session, so DNS and VoIP work, not only DNS. */
-    val udpgwActive: Boolean get() = udpgw?.isAlive == true
+    val udpgwActive: Boolean get() = udpLane.session?.isAlive == true
 
     /** True while this exit is still believed to be able to dial IPv6. */
     val ipv6Reachable: Boolean get() = ipv6Usable.get()
@@ -334,9 +563,10 @@ object PsiphonSocksFront {
         val quic = quicDropped.get()
         val bulk = bulkUdpDropped.get()
         val v6 = ipv6Refused.get()
-        if (quic == 0L && bulk == 0L && v6 == 0L) return null
+        val aaaa = aaaaSuppressed.get()
+        if (quic == 0L && bulk == 0L && v6 == 0L && aaaa == 0L) return null
         return "udp/443 (QUIC) dropped=$quic, congested udpgw frames dropped=$bulk, " +
-            "IPv6 flows refused locally=$v6"
+            "IPv6 flows refused locally=$v6, AAAA answered empty locally=$aaaa"
     }
 
     /**
@@ -366,14 +596,22 @@ object PsiphonSocksFront {
         serverSocket = server
         connPool = Executors.newCachedThreadPool()
         dnsPool = Executors.newFixedThreadPool(DNS_POOL_SIZE)
-        udpgw = null
+        // Two threads so the bulk lane never waits behind the DNS lane's dial.
+        dialPool = Executors.newFixedThreadPool(3)
+        closeLanes()
         udpgwRefused.set(false)
         ipv6Usable.set(true)
         ipv6Refusals.set(0)
         dnsPort53Refused.set(false)
+        privateDnsBlocked.set(false)
         quicDropped.set(0)
         bulkUdpDropped.set(0)
         ipv6Refused.set(0)
+        aaaaSuppressed.set(0)
+        quicSuppressedUntil.set(0)
+        bulkDropWindowStart.set(0)
+        bulkDropsInWindow.set(0)
+        drainDohPool()
         // Zeroed per session so the service's traffic deltas start from a known
         // baseline; a restart must not look like a sudden burst.
         txBytes.set(0)
@@ -424,6 +662,13 @@ object PsiphonSocksFront {
             "$TAG listening on 127.0.0.1:$listenPort → Psiphon SOCKS $socksPort, " +
                 "UDP via udpgw $UDPGW_HOST:$UDPGW_PORT"
         )
+        // PRE-WARM, 1.2.7-r3. The front is only ever started once Psiphon has a
+        // tunnel, so both lanes and the IPv6 verdict can be established BEFORE
+        // the TUN comes up and the first app packet arrives. Previously the first
+        // DNS query paid for the dial and the first two IPv6 flows paid for the
+        // verdict - which is precisely the window in which a user opens an app and
+        // decides the network is broken.
+        warmUp()
         return true
     }
 
@@ -446,10 +691,7 @@ object PsiphonSocksFront {
         if (socksPort <= 0 || socksPort == psiphonSocksPort) return
         val previous = psiphonSocksPort
         psiphonSocksPort = socksPort
-        synchronized(udpgwLock) {
-            udpgw?.close()
-            udpgw = null
-        }
+        closeLanes()
         udpgwRefused.set(false)
         ConnectionLog.record(
             "$TAG upstream Psiphon SOCKS moved $previous -> $socksPort; the front keeps its own " +
@@ -475,10 +717,7 @@ object PsiphonSocksFront {
     @Synchronized
     fun onServerRotated() {
         if (!running.get()) return
-        synchronized(udpgwLock) {
-            udpgw?.close()
-            udpgw = null
-        }
+        closeLanes()
         val wasRefused = udpgwRefused.getAndSet(false)
         // The IPv6 and port-53 verdicts describe the EXIT SERVER, not the
         // tunnel, so a rotation earns the replacement one fresh probe each.
@@ -487,6 +726,11 @@ object PsiphonSocksFront {
         ipv6Usable.set(true)
         ipv6Refusals.set(0)
         dnsPort53Refused.set(false)
+        // A rotation invalidates every warm connection through the old server.
+        drainDohPool()
+        quicSuppressedUntil.set(0)
+        bulkDropsInWindow.set(0)
+        warmUp()
         ConnectionLog.record(
             if (wasRefused) {
                 "$TAG server rotated - clearing the udpgw refusal so the new server gets " +
@@ -502,19 +746,20 @@ object PsiphonSocksFront {
         if (!running.getAndSet(false)) return
         closeQuietly(serverSocket)
         serverSocket = null
-        synchronized(udpgwLock) {
-            udpgw?.close()
-            udpgw = null
-        }
+        closeLanes()
+        drainDohPool()
         udpgwRefused.set(false)
         ipv6Usable.set(true)
         ipv6Refusals.set(0)
         dnsPort53Refused.set(false)
+        quicSuppressedUntil.set(0)
         dropSummary()?.let { ConnectionLog.record("$TAG session drops: $it") }
         connPool?.shutdownNow()
         connPool = null
         dnsPool?.shutdownNow()
         dnsPool = null
+        dialPool?.shutdownNow()
+        dialPool = null
         ConnectionLog.record("$TAG stopped")
     }
 
@@ -523,6 +768,8 @@ object PsiphonSocksFront {
     private fun handleClient(client: Socket) {
         try {
             client.tcpNoDelay = true
+            // 1.2.8-r8: keep the upload from re-queueing here. See LOOPBACK_QUEUE.
+            boundLoopbackQueue(client)
             val input = DataInputStream(BufferedInputStream(client.getInputStream()))
             val output = BufferedOutputStream(client.getOutputStream())
 
@@ -684,13 +931,7 @@ object PsiphonSocksFront {
         ipv6Refused.incrementAndGet()
         if (!ipv6Usable.get()) return
         if (ipv6Refusals.incrementAndGet() < IPV6_PROBE_BUDGET) return
-        if (!ipv6Usable.compareAndSet(true, false)) return
-        ConnectionLog.record(
-            "$TAG this exit cannot dial IPv6 (refused $host:$port) - IPv6 flows are now refused " +
-                "locally and instantly so apps fall back to IPv4 without waiting. This is a " +
-                "property of the Psiphon exit, not censorship, and is not counted against the " +
-                "server.",
-        )
+        latchIpv6Unusable("$host:$port was refused")
     }
 
     /**
@@ -711,6 +952,29 @@ object PsiphonSocksFront {
             return
         }
         if (host == UDPGW_HOST && port == UDPGW_PORT) return
+        if (port == 853) {
+            // ANDROID PRIVATE DNS (DNS-over-TLS), 1.2.7-r3.
+            //
+            // `netd` resolves through the user's Private DNS setting, not through
+            // this front, and a good many Psiphon servers do not allow TCP/853
+            // out. In "Automatic" mode Android falls back to plain DNS by itself
+            // and nothing is lost. In STRICT mode (a hostname typed into the
+            // setting) there IS no fallback, so the device resolves nothing at all
+            // while the tunnel is perfectly healthy - "connected, browsers open
+            // nothing, Telegram works". No app can turn that setting off on the
+            // user's behalf, so the least this can do is name it in the log
+            // instead of letting it look like the tunnel's fault.
+            if (privateDnsBlocked.compareAndSet(false, true)) {
+                ConnectionLog.record(
+                    "$TAG this server does not allow outbound TCP/853, which is where Android's " +
+                        "Private DNS (DNS-over-TLS) goes. If Private DNS is set to a specific " +
+                        "hostname, set it back to Automatic or Off: in strict mode Android has no " +
+                        "fallback and NOTHING on the device will resolve, however healthy the " +
+                        "tunnel is. Not counted as censorship.",
+                )
+            }
+            return
+        }
         if (port == 53) {
             if (dnsPort53Refused.compareAndSet(false, true)) {
                 ConnectionLog.record(
@@ -739,10 +1003,19 @@ object PsiphonSocksFront {
         val upstream = try {
             Socket().apply {
                 tcpNoDelay = true
+                // 1.2.8-r8: before connect(), so the bound is in force for the
+                // whole life of the leg. See LOOPBACK_QUEUE.
+                boundLoopbackQueue(this)
                 connect(
                     InetSocketAddress("127.0.0.1", psiphonSocksPort),
                     PSIPHON_CONNECT_TIMEOUT_MS,
                 )
+                // 1.2.7-r3: the SOCKS exchange used to be read with NO timeout at
+                // all, so a Psiphon that accepted the connection and never
+                // answered parked the calling thread FOREVER. On a udpgw dial that
+                // meant a lane that never came up and never retried; on a DNS
+                // lookup it meant a worker held for the life of the session.
+                soTimeout = PSIPHON_HANDSHAKE_TIMEOUT_MS
             }
         } catch (e: Exception) {
             return null
@@ -821,6 +1094,9 @@ object PsiphonSocksFront {
                 closeQuietly(upstream)
                 return null
             }
+            // The handshake budget must not become a read budget: a relayed flow
+            // (and a udpgw lane) is idle for minutes at a time by design.
+            runCatching { upstream.soTimeout = 0 }
             return PsiphonStream(upstream, upIn, upOut)
         } catch (e: Exception) {
             closeQuietly(upstream)
@@ -888,6 +1164,23 @@ object PsiphonSocksFront {
         } finally {
             closeQuietly(upstream)
             closeQuietly(client)
+        }
+    }
+
+    /**
+     * Caps one loopback leg's kernel queue. See [LOOPBACK_QUEUE] for why.
+     *
+     * Best-effort by design: a kernel that refuses the request leaves the socket
+     * exactly as it was, which is never worse than not trying.
+     */
+    private fun boundLoopbackQueue(socket: Socket) {
+        try {
+            socket.sendBufferSize = LOOPBACK_QUEUE
+        } catch (_: Exception) {
+        }
+        try {
+            socket.receiveBufferSize = LOOPBACK_QUEUE
+        } catch (_: Exception) {
         }
     }
 
@@ -973,7 +1266,7 @@ object PsiphonSocksFront {
             // Control connection gone — the association is over.
         } finally {
             runCatching { relay.close() }
-            udpgw?.releaseFlowsFor(relay)
+            udpLane.session?.releaseFlowsFor(relay)
             closeQuietly(client)
         }
     }
@@ -996,23 +1289,53 @@ object PsiphonSocksFront {
             val request = parseUdpRequest(datagram) ?: continue
             if (request.payload.isEmpty()) continue
 
-            // POLICY, before anything is carried. Both of these are drops on
-            // purpose: UDP is a lossy service by contract, and a datagram that
-            // is dropped here costs nothing, while the same datagram carried
-            // over a single shared TCP stream costs every OTHER flow on the
-            // device its latency. See [SUPPRESS_QUIC] and [IPV6_PROBE_BUDGET].
-            if (SUPPRESS_QUIC && request.port == QUIC_PORT) {
-                quicDropped.incrementAndGet()
-                continue
-            }
+            // POLICY, before anything is carried.
             if (request.isIpv6 && !ipv6Usable.get()) {
+                // This exit has no IPv6 (see [latchIpv6Unusable]); the round trip
+                // that proves it again costs the flow its Happy-Eyeballs timer.
                 ipv6Refused.incrementAndGet()
                 continue
             }
+            if (request.port == QUIC_PORT && !quicAllowed()) {
+                // Only while the breaker is open or the server refuses udpgw
+                // outright. QUIC is carried by default - see [CARRY_QUIC].
+                quicDropped.incrementAndGet()
+                continue
+            }
 
-            // Preferred path: real UDP through Psiphon's remote udpgw.
+            // AAAA SUPPRESSION, 1.2.7-r3.
+            //
+            // ROOT CAUSE: the TUN advertises an IPv6 address and a ::/0 route, so
+            // the device sees working IPv6 and prefers AAAA - while the exit has
+            // none. Refusing those flows fast (which the front does) still leaves
+            // every app paying a failed connection attempt per destination, and
+            // the apps that report "no internet" are exactly the ones that give
+            // up instead of falling back. Removing the AAAA record removes the
+            // reason the app ever tries: one empty NOERROR, answered here in
+            // microseconds, and the whole device settles on IPv4 by itself.
+            //
+            // This is deliberately NOT a lie about IPv6 in general: it is only
+            // done once the exit has PROVEN it cannot dial IPv6, and it is undone
+            // for a server rotation that might be able to.
+            if (request.port == 53 && !ipv6Usable.get()) {
+                val nodata = nodataAnswerForAaaa(request.payload)
+                if (nodata != null) {
+                    aaaaSuppressed.incrementAndGet()
+                    sendUdpReply(relay, from, request, nodata)
+                    continue
+                }
+            }
+
+            // Preferred path: real UDP through Psiphon's remote udpgw. DNS rides
+            // its OWN stream so bulk UDP cannot delay a name lookup.
             if (request.address != null) {
-                val session = udpgwSession()
+                // 1.2.8-r2: ONE stream. DNS is prioritised inside it (see
+                // [UdpgwSession.send] -> priority = isDns), which is where
+                // prioritisation belongs now that there is a single socket and a
+                // single writer thread. Two streams meant two port forwards, and
+                // a Psiphon tunnel only ever keeps the newest one - see
+                // [UdpgwLane].
+                val session = laneSession(udpLane)
                 if (session != null && session.send(relay, from, request)) {
                     txBytes.addAndGet(request.payload.size.toLong())
                     continue
@@ -1348,6 +1671,10 @@ object PsiphonSocksFront {
                     while (bulkFrames.size >= UDPGW_BULK_QUEUE) {
                         bulkFrames.removeFirst()
                         bulkUdpDropped.incrementAndGet()
+                        // The drop IS the loss signal QUIC needs. It is also the
+                        // only evidence available that this tunnel cannot carry
+                        // the flow at all, so the breaker counts it.
+                        noteBulkDrop()
                     }
                     bulkFrames.addLast(frame)
                 }
@@ -1441,44 +1768,297 @@ object PsiphonSocksFront {
     }
 
     /**
-     * Returns the shared udpgw session, opening it on first use.
+     * The live session for [lane], or null - NEVER a dial.
      *
-     * A refusal is remembered for the whole session ([udpgwRefused]): if this
-     * server will not intercept `127.0.0.1:7300`, retrying per datagram would
-     * mean one doomed port forward per UDP packet, which is exactly the kind of
-     * churn that made the original log unreadable.
+     * A missing lane schedules its own dial in the background and returns null at
+     * once. See [dialPool] for why dialling here would stop UDP for the whole
+     * device.
      */
-    private fun udpgwSession(): UdpgwSession? {
-        udpgw?.let { if (it.isAlive) return it }
-        if (udpgwRefused.get()) return null
-        synchronized(udpgwLock) {
-            udpgw?.let { if (it.isAlive) return it }
-            if (udpgwRefused.get()) return null
-            udpgw?.close()
-            udpgw = null
+    private fun laneSession(lane: UdpgwLane): UdpgwSession? {
+        lane.session?.let { if (it.isAlive) return it }
+        ensureLane(lane)
+        return null
+    }
 
+    /**
+     * Schedules one dial for [lane] if none is in flight. Never blocks.
+     *
+     * 1.2.8-r2: rate-limited. This is reached from the datagram pump, i.e. up to
+     * thousands of times a second while the stream is down, and a dial is an SSH
+     * channel open across the whole pipeline. Without the gap a udpgw that is
+     * failing becomes a channel-open flood on the tunnel it needs.
+     */
+    private fun ensureLane(lane: UdpgwLane) {
+        if (!running.get() || udpgwRefused.get()) return
+        if (nowMs() < lane.nextDialAt) return
+        if (!lane.dialing.compareAndSet(false, true)) return
+        val pool = dialPool
+        if (pool == null) {
+            lane.dialing.set(false)
+            return
+        }
+        try {
+            pool.execute {
+                try {
+                    dialLane(lane)
+                } catch (_: Throwable) {
+                    // A failed dial is a retry, never a crash.
+                } finally {
+                    lane.dialing.set(false)
+                }
+            }
+        } catch (_: Exception) {
+            // Pool shut down between the check and the submit.
+            lane.dialing.set(false)
+        }
+    }
+
+    /**
+     * Opens one udpgw port forward for [lane]. Runs on [dialPool] only.
+     *
+     * A refusal is remembered for the whole session ([udpgwRefused]) and shared by
+     * both lanes: if this server will not intercept `127.0.0.1:7300`, retrying per
+     * datagram would mean one doomed port forward per UDP packet, which is exactly
+     * the churn that made the original field log unreadable.
+     */
+    private fun dialLane(lane: UdpgwLane) {
+        synchronized(lane.lock) {
+            lane.session?.let { if (it.isAlive) return }
+            lane.session?.close()
+            lane.session = null
+            if (!running.get() || udpgwRefused.get()) return
+
+            // Claim the next slot BEFORE dialling, so a dial that takes seconds
+            // cannot be followed immediately by another one.
+            lane.nextDialAt = nowMs() + UDPGW_DIAL_MIN_GAP_MS
             val refusal = IntArray(1) { -1 }
             val stream = openPsiphonStream(UDPGW_HOST, UDPGW_PORT, refusal)
             if (stream == null) {
+                val failures = lane.failures.incrementAndGet()
+                // Exponential, capped: 400 ms, 800, 1600, 3200, 5000, 5000...
+                val gap = (UDPGW_DIAL_MIN_GAP_MS shl (failures - 1).coerceIn(0, 6))
+                    .coerceAtMost(UDPGW_DIAL_MAX_GAP_MS)
+                lane.nextDialAt = nowMs() + gap
                 if (refusal[0] > 0) {
                     // A real answer from the server: it will not intercept.
                     // Falling back is the correct outcome, not an error.
-                    udpgwRefused.set(true)
+                    if (udpgwRefused.compareAndSet(false, true)) {
+                        ConnectionLog.record(
+                            "$TAG this server refused the udpgw port forward (SOCKS reply " +
+                                "${refusal[0]}) - DNS moves to the resolver path (DNS-over-TCP, " +
+                                "then DNS-over-HTTPS on 443) and non-DNS UDP is dropped",
+                        )
+                    }
+                } else if (failures == 1 || failures % 10 == 0) {
                     ConnectionLog.record(
-                        "$TAG this server refused the udpgw port forward (SOCKS reply " +
-                            "${refusal[0]}) - UDP falls back to DNS-over-TCP, non-DNS UDP is dropped"
+                        "$TAG could not open the udpgw stream ($failures in a row); " +
+                            "retrying in ${gap} ms",
                     )
-                } else {
-                    ConnectionLog.record("$TAG could not open the udpgw session; will retry")
                 }
-                return null
+                return
             }
             val session = UdpgwSession(stream.socket, stream.input, stream.output)
+            if (!running.get()) {
+                session.close()
+                return
+            }
             session.startReader()
-            udpgw = session
-            ConnectionLog.record("$TAG udpgw session up - full UDP (DNS + QUIC) via Psiphon")
-            return session
+            lane.session = session
+            lane.failures.set(0)
+            val dials = lane.dials.incrementAndGet()
+            // The churn this replaces used to fill the log with 219 of these in
+            // 18 minutes. Log the first few, then only every 50th - if the count
+            // ever climbs again, the number itself is the diagnosis.
+            if (dials <= UDPGW_DIAL_LOG_BUDGET || dials % 50 == 0L) {
+                ConnectionLog.record(
+                    "$TAG udpgw stream up (#$dials) - full UDP via Psiphon, " +
+                        "DNS prioritised inside it",
+                )
+            }
         }
+    }
+
+    /** Closes the udpgw stream. Lock-free so a teardown can never park on a dial. */
+    private fun closeLanes() {
+        val session = udpLane.session
+        udpLane.session = null
+        udpLane.nextDialAt = 0
+        udpLane.failures.set(0)
+        session?.close()
+    }
+
+    /**
+     * Establishes everything that can be known before the first app packet:
+     * both udpgw lanes and the exit's IPv6 capability.
+     */
+    private fun warmUp() {
+        ensureLane(udpLane)
+        val pool = dialPool ?: return
+        try {
+            pool.execute {
+                try {
+                    probeIpv6Capability()
+                } catch (_: Throwable) {
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Settles "can this exit dial IPv6?" once, up front, on a background thread.
+     *
+     * Only an EXPLICIT refusal is proof. No answer at all can mean a busy tunnel,
+     * so it leaves the optimistic assumption in place and lets
+     * [noteIpv6Refusal] settle it from real traffic.
+     */
+    private fun probeIpv6Capability() {
+        if (!running.get()) return
+        val refusal = IntArray(1) { -1 }
+        val stream = openPsiphonStream(IPV6_PROBE_TARGET, IPV6_PROBE_PORT, refusal)
+        if (stream != null) {
+            closeQuietly(stream.socket)
+            ConnectionLog.record(
+                "$TAG this exit can dial IPv6 - AAAA records are left untouched",
+            )
+            return
+        }
+        if (refusal[0] > 0) {
+            latchIpv6Unusable(
+                "the up-front probe to [$IPV6_PROBE_TARGET]:$IPV6_PROBE_PORT came back refused " +
+                    "(SOCKS reply ${refusal[0]})",
+            )
+        }
+    }
+
+    /** Latches the "no IPv6 on this exit" verdict exactly once, with one log line. */
+    private fun latchIpv6Unusable(why: String) {
+        if (!ipv6Usable.compareAndSet(true, false)) return
+        ConnectionLog.record(
+            "$TAG this exit has no IPv6 ($why). AAAA queries are now answered locally with an " +
+                "empty NOERROR so the device stops preferring IPv6 in the first place, IPv6 flows " +
+                "are refused instantly instead of after a round trip, and none of it is counted " +
+                "against the server - it is a property of the exit, not censorship.",
+        )
+    }
+
+    // ------------------------------------------------------------ QUIC breaker
+
+    /** Monotonic clock; wall time can jump and this drives a cooldown. */
+    private fun nowMs(): Long = System.nanoTime() / 1_000_000L
+
+    /**
+     * Whether UDP/443 is carried right now.
+     *
+     * False only when the server refuses udpgw altogether (nothing to carry it
+     * on) or while [noteBulkDrop]'s breaker is open.
+     */
+    private fun quicAllowed(): Boolean {
+        if (!CARRY_QUIC) return false
+        if (udpgwRefused.get()) return false
+        return nowMs() >= quicSuppressedUntil.get()
+    }
+
+    /**
+     * Counts one dropped bulk frame and trips the breaker on a sustained storm.
+     *
+     * Called from the writer's queue, so it must stay allocation-free and
+     * non-blocking.
+     */
+    private fun noteBulkDrop() {
+        val now = nowMs()
+        if (now - bulkDropWindowStart.get() > QUIC_TRIP_WINDOW_MS) {
+            bulkDropWindowStart.set(now)
+            bulkDropsInWindow.set(1)
+            return
+        }
+        if (bulkDropsInWindow.incrementAndGet() < QUIC_TRIP_DROPS) return
+        bulkDropsInWindow.set(0)
+        bulkDropWindowStart.set(now)
+        val previous = quicSuppressedUntil.getAndSet(now + QUIC_COOLDOWN_MS)
+        if (previous <= now) {
+            ConnectionLog.record(
+                "$TAG the bulk UDP lane is dropping faster than QUIC can back off - UDP/443 is " +
+                    "suppressed for ${QUIC_COOLDOWN_MS / 1000}s so the rest of the device keeps " +
+                    "its latency, then carried again automatically. TCP is untouched.",
+            )
+        }
+    }
+
+    // ------------------------------------------------------------ DNS helpers
+
+    /** Wraps [answer] in the association's SOCKS5 UDP header and sends it back. */
+    private fun sendUdpReply(
+        relay: DatagramSocket,
+        client: InetSocketAddress,
+        request: UdpRequest,
+        answer: ByteArray,
+    ) {
+        val reply = ByteArray(request.header.size + answer.size)
+        System.arraycopy(request.header, 0, reply, 0, request.header.size)
+        System.arraycopy(answer, 0, reply, request.header.size, answer.size)
+        rxBytes.addAndGet(answer.size.toLong())
+        try {
+            relay.send(DatagramPacket(reply, reply.size, client.address, client.port))
+        } catch (e: Exception) {
+            // Association torn down between the query and the answer.
+        }
+    }
+
+    /** The single question of a query: its QTYPE and where the question ends. */
+    private class DnsQuestion(val type: Int, val end: Int)
+
+    /**
+     * Parses the one question of a DNS QUERY, or null for anything else.
+     *
+     * Deliberately strict: a response, a multi-question message, a compression
+     * pointer in a question (which is illegal) or a truncated buffer all return
+     * null, and the datagram is then carried untouched. Nothing here is allowed
+     * to guess.
+     */
+    private fun parseDnsQuestion(payload: ByteArray): DnsQuestion? {
+        if (payload.size < 17) return null
+        if (payload[2].toInt() and 0x80 != 0) return null // a response, not a query
+        val questions = ((payload[4].toInt() and 0xFF) shl 8) or (payload[5].toInt() and 0xFF)
+        if (questions != 1) return null
+        var at = 12
+        var labels = 0
+        while (at < payload.size && labels++ < 128) {
+            val length = payload[at].toInt() and 0xFF
+            if (length == 0) {
+                at += 1
+                if (at + 4 > payload.size) return null
+                val type = ((payload[at].toInt() and 0xFF) shl 8) or (payload[at + 1].toInt() and 0xFF)
+                return DnsQuestion(type, at + 4)
+            }
+            if (length and 0xC0 != 0) return null // pointer / reserved
+            at += length + 1
+        }
+        return null
+    }
+
+    /**
+     * An empty NOERROR answer to [query] when, and only when, it is an AAAA
+     * query. Null for anything else, so the caller carries the datagram normally.
+     *
+     * This is the standard "NODATA" shape: the question is echoed, `QR` and `RA`
+     * are set, `RCODE` is 0 and every count except QDCOUNT is zero. Every resolver
+     * on Android reads that as "this name has no IPv6 address" and asks for the A
+     * record instead - which is exactly the outcome wanted.
+     */
+    private fun nodataAnswerForAaaa(query: ByteArray): ByteArray? {
+        val question = parseDnsQuestion(query) ?: return null
+        if (question.type != DNS_TYPE_AAAA) return null
+        if (question.end > query.size) return null
+        val reply = query.copyOfRange(0, question.end)
+        // QR=1, OPCODE=0, AA=0, TC=0, RD copied from the query.
+        reply[2] = ((query[2].toInt() and 0x01) or 0x80).toByte()
+        // RA=1, Z=0, RCODE=0 (NOERROR).
+        reply[3] = 0x80.toByte()
+        reply[6] = 0; reply[7] = 0 // ANCOUNT
+        reply[8] = 0; reply[9] = 0 // NSCOUNT
+        reply[10] = 0; reply[11] = 0 // ARCOUNT
+        return reply
     }
 
     // --------------------------------------------------------- DNS over TCP
@@ -1656,75 +2236,187 @@ object PsiphonSocksFront {
     }
 
     /**
-     * Answers one DNS query over DNS-over-HTTPS (RFC 8484) through Psiphon.
+     * A warm DoH connection through Psiphon.
      *
-     * The query and the answer are the SAME wire-format DNS message the device
-     * sent and expects, so nothing has to be re-encoded and the transaction id
-     * matches by construction.
+     * The socket, its TLS layer and both streams travel together and are never
+     * re-derived: a stream taken again after a buffered read resumes past
+     * whatever the buffer already swallowed.
+     */
+    private class DohConn(
+        val host: String,
+        val socket: Socket,
+        val tls: SSLSocket,
+        val input: InputStream,
+        val output: OutputStream,
+    ) {
+        @Volatile var idleSince: Long = 0
+    }
+
+    private val dohLock = Any()
+    private val dohIdle = ArrayDeque<DohConn>()
+
+    /** Most-recently-used first, so a warm connection is preferred over a cold one. */
+    private fun takeDohConn(): DohConn? {
+        val now = nowMs()
+        while (true) {
+            val conn = synchronized(dohLock) { dohIdle.removeLastOrNull() } ?: return null
+            if (conn.socket.isClosed || now - conn.idleSince > DOH_IDLE_MS) {
+                closeDohConn(conn)
+                continue
+            }
+            return conn
+        }
+    }
+
+    private fun releaseDohConn(conn: DohConn) {
+        if (!running.get() || conn.socket.isClosed) {
+            closeDohConn(conn)
+            return
+        }
+        conn.idleSince = nowMs()
+        val evicted = synchronized(dohLock) {
+            dohIdle.addLast(conn)
+            if (dohIdle.size > DOH_POOL_MAX) dohIdle.removeFirstOrNull() else null
+        }
+        evicted?.let { closeDohConn(it) }
+    }
+
+    private fun closeDohConn(conn: DohConn) {
+        closeQuietly(conn.tls)
+        closeQuietly(conn.socket)
+    }
+
+    /** Drops every pooled connection. A rotation or a teardown invalidates all of them. */
+    private fun drainDohPool() {
+        val doomed = synchronized(dohLock) {
+            val all = dohIdle.toList()
+            dohIdle.clear()
+            all
+        }
+        doomed.forEach { closeDohConn(it) }
+    }
+
+    /**
+     * Opens one DoH connection through Psiphon, trying each resolver in turn.
      *
      * TLS is verified properly: the system trust store plus an explicit hostname
      * check. `startHandshake()` validates the chain but does NOT check that the
      * certificate belongs to the host, so without the second check anyone holding
-     * a certificate for any domain could answer the device's DNS - and DNS
-     * answers steer every connection that follows.
+     * a certificate for any domain could answer the device's DNS - and DNS answers
+     * steer every connection that follows.
+     *
+     * The resolver host is sent to Psiphon as a HOSTNAME so it is resolved INSIDE
+     * the tunnel; resolving it here would leak the name to the carrier's resolver
+     * and defeat the point of the hop.
+     */
+    private fun openDohConn(): DohConn? {
+        for (host in DOH_HOSTS) {
+            if (!running.get()) return null
+            val raw = openPsiphonRawStream(host, DOH_PORT) ?: continue
+            try {
+                val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
+                val tls = factory.createSocket(raw, host, DOH_PORT, true) as SSLSocket
+                tls.soTimeout = DNS_TIMEOUT_MS
+                tls.startHandshake()
+                if (!HttpsURLConnection.getDefaultHostnameVerifier().verify(host, tls.session)) {
+                    throw SSLPeerUnverifiedException("$host certificate mismatch (possible MitM)")
+                }
+                return DohConn(host, raw, tls, tls.inputStream, tls.outputStream)
+            } catch (e: Exception) {
+                closeQuietly(raw)
+            }
+        }
+        return null
+    }
+
+    /**
+     * One RFC 8484 exchange on [conn]. Throws on anything that makes the
+     * connection unsafe to reuse, so the caller can close it and try a fresh one.
+     *
+     * The query and the answer are the SAME wire-format DNS message the device
+     * sent and expects, so nothing has to be re-encoded and the transaction id
+     * matches by construction.
+     */
+    private fun dohExchange(conn: DohConn, query: ByteArray): ByteArray? {
+        val head = (
+            "POST $DOH_PATH HTTP/1.1\r\n" +
+                "Host: ${conn.host}\r\n" +
+                "Accept: application/dns-message\r\n" +
+                "Content-Type: application/dns-message\r\n" +
+                "Content-Length: ${query.size}\r\n" +
+                "Connection: keep-alive\r\n\r\n"
+            ).toByteArray(Charsets.US_ASCII)
+        conn.tls.soTimeout = DNS_TIMEOUT_MS
+        conn.output.write(head)
+        conn.output.write(query)
+        conn.output.flush()
+        return readDohBody(conn.input)
+    }
+
+    /**
+     * Answers one DNS query over DNS-over-HTTPS (RFC 8484) through Psiphon.
+     *
+     * ## ROOT CAUSE this revision fixes
+     *
+     * This used to open a brand-new port forward AND a brand-new TLS handshake
+     * for every single name, then close it (`Connection: close`). Through a
+     * chained session that is seconds per lookup with only [DNS_POOL_SIZE] in
+     * flight, so on any server that refuses udpgw the device effectively had no
+     * working resolver: browsers opened nothing while Telegram - hard-coded IPs,
+     * no DNS - kept working. Connections are pooled and reused now, so a whole
+     * page load costs one round trip per name on an already-warm connection.
      */
     private fun answerDnsOverHttps(
         relay: DatagramSocket,
         client: InetSocketAddress,
         request: UdpRequest,
     ) {
-        val raw = openPsiphonRawStream(DOH_HOST, DOH_PORT) ?: return
-        val answer = try {
-            val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
-            val tls = factory.createSocket(raw, DOH_HOST, DOH_PORT, true) as SSLSocket
-            tls.soTimeout = DNS_TIMEOUT_MS
-            tls.startHandshake()
-            if (!HttpsURLConnection.getDefaultHostnameVerifier().verify(DOH_HOST, tls.session)) {
-                throw SSLPeerUnverifiedException("$DOH_HOST certificate mismatch (possible MitM)")
+        var conn = takeDohConn()
+        var answer: ByteArray? = null
+        if (conn != null) {
+            answer = try {
+                dohExchange(conn, request.payload)
+            } catch (e: Exception) {
+                null
             }
-            val head = (
-                "POST $DOH_PATH HTTP/1.1\r\n" +
-                    "Host: $DOH_HOST\r\n" +
-                    "Accept: application/dns-message\r\n" +
-                    "Content-Type: application/dns-message\r\n" +
-                    "Content-Length: ${request.payload.size}\r\n" +
-                    "Connection: close\r\n\r\n"
-                ).toByteArray(Charsets.US_ASCII)
-            val out = tls.getOutputStream()
-            out.write(head)
-            out.write(request.payload)
-            out.flush()
-            readDohBody(tls.getInputStream())
-        } catch (e: Exception) {
-            // One unanswered query. Every resolver on earth drops a packet now
-            // and then and every client retries, so this is a stall at worst -
-            // never a failure mode of the mode itself.
-            null
-        } finally {
-            closeQuietly(raw)
+            if (answer == null || answer.isEmpty()) {
+                // A pooled connection the resolver has since closed is the normal
+                // case here, not an error. Retry once on a fresh one.
+                closeDohConn(conn)
+                conn = null
+                answer = null
+            }
         }
-        if (answer == null || answer.isEmpty()) return
-
-        val reply = ByteArray(request.header.size + answer.size)
-        System.arraycopy(request.header, 0, reply, 0, request.header.size)
-        System.arraycopy(answer, 0, reply, request.header.size, answer.size)
-        rxBytes.addAndGet(answer.size.toLong())
-        try {
-            relay.send(DatagramPacket(reply, reply.size, client.address, client.port))
-        } catch (e: Exception) {
-            // Association torn down between the query and the answer.
+        if (answer == null) {
+            val fresh = openDohConn() ?: return
+            conn = fresh
+            answer = try {
+                dohExchange(fresh, request.payload)
+            } catch (e: Exception) {
+                // One unanswered query. Every resolver on earth drops a packet now
+                // and then and every client retries, so this is a stall at worst -
+                // never a failure mode of the mode itself.
+                null
+            }
         }
+        val live = conn ?: return
+        if (answer == null || answer.isEmpty()) {
+            closeDohConn(live)
+            return
+        }
+        releaseDohConn(live)
+        sendUdpReply(relay, client, request, answer)
     }
 
     /**
      * Reads one HTTP/1.1 response and returns its body.
      *
-     * Deliberately minimal: the only server this ever talks to is a DoH resolver
-     * answering a POST with a small binary body. `Content-Length` is honoured when
-     * present; otherwise the body is whatever arrives before the server closes,
-     * which is what `Connection: close` asks for. Chunked encoding is not accepted
-     * rather than half-parsed - a resolver that used it would simply fall back to
-     * the next query.
+     * `Content-Length` is REQUIRED, unlike the `Connection: close` version this
+     * replaces: on a reused connection a close-delimited body is indistinguishable
+     * from a response that has not finished arriving, and waiting for a close that
+     * never comes would hang the lookup. A resolver that answered with chunked
+     * encoding or no length is treated as unusable and its connection is dropped -
+     * neither Cloudflare nor Google ever does for a DoH POST.
      */
     private fun readDohBody(input: InputStream): ByteArray? {
         val header = StringBuilder()
@@ -1741,26 +2433,16 @@ object PsiphonSocksFront {
         if (!status.contains(" 200")) return null
         if (head.contains("Transfer-Encoding: chunked", ignoreCase = true)) return null
         val declared = Regex("(?i)Content-Length:\\s*(\\d+)").find(head)
-            ?.groupValues?.get(1)?.toIntOrNull()
-        if (declared != null) {
-            if (declared <= 0 || declared > DNS_BUFFER) return null
-            val body = ByteArray(declared)
-            var read = 0
-            while (read < declared) {
-                val n = input.read(body, read, declared - read)
-                if (n < 0) return null
-                read += n
-            }
-            return body
+            ?.groupValues?.get(1)?.toIntOrNull() ?: return null
+        if (declared <= 0 || declared > DNS_BUFFER) return null
+        val body = ByteArray(declared)
+        var read = 0
+        while (read < declared) {
+            val n = input.read(body, read, declared - read)
+            if (n < 0) return null
+            read += n
         }
-        val buffer = java.io.ByteArrayOutputStream()
-        val chunk = ByteArray(1024)
-        while (buffer.size() <= DNS_BUFFER) {
-            val n = input.read(chunk)
-            if (n < 0) break
-            buffer.write(chunk, 0, n)
-        }
-        return buffer.toByteArray().takeIf { it.isNotEmpty() && it.size <= DNS_BUFFER }
+        return body
     }
 
     private fun closeQuietly(closeable: java.io.Closeable?) {

@@ -169,6 +169,7 @@
 
     <!-- درباره: نسخهٔ هسته (همتای نسخهٔ ویندوز) -->
     <string name="about_core_version">نسخهٔ هسته (Core) %1$s</string>
+    <string name="about_patch_level">نسخهٔ بیلد: %1$s</string>
 
     <!-- قابلیت‌های هستهٔ ۱.۵.۰ -->
     <string name="section_zerotrust">Zero Trust (سازمانی)</string>

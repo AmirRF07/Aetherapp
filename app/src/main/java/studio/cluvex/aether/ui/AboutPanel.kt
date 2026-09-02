@@ -154,6 +154,29 @@ fun AboutPanel(modifier: Modifier = Modifier, startExpanded: Boolean = false) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    // 1.2.8-r5 BUILD IDENTITY, visible without opening the log.
+                    //
+                    // versionName is "1.2.8" for r2, r3, r4 and r5 alike and the
+                    // core version is 1.8.0 in all of them, so neither row above
+                    // can tell two revisions apart. That is not a cosmetic gap:
+                    // the r4 field test was carried out on the r3 build and
+                    // nobody could see it. This row is the one that answers
+                    // "which build am I actually running", and it turns red when
+                    // the engine inside the APK disagrees with the APK.
+                    Text(
+                        text = stringResource(
+                            R.string.about_patch_level,
+                            studio.cluvex.aether.core.BuildProvenance.summary(),
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (studio.cluvex.aether.core.BuildProvenance.enginePatchLevel != null &&
+                            !studio.cluvex.aether.core.BuildProvenance.consistent
+                        ) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
 
                     Spacer(Modifier.height(16.dp))
 

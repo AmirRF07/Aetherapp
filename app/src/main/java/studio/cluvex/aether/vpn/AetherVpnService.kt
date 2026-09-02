@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -41,6 +42,7 @@ import studio.cluvex.aether.model.SplitMode
 import studio.cluvex.aether.model.TransportBackend
 import studio.cluvex.aether.transport.ExternalTransport
 import studio.cluvex.aether.transport.ExternalTransportFactory
+import studio.cluvex.aether.transport.PsiphonHealth
 import studio.cluvex.aether.widget.AetherWidgetProvider
 import java.io.File
 
@@ -91,6 +93,16 @@ class AetherVpnService : VpnService() {
 
     /** Consecutive failed watchdog probes (1.2.4 stability watchdog). */
     private var probeFailures = 0
+
+    /** One-shot guard for [registerSelfProbes]. */
+    private var selfProbesRegistered = false
+
+    /**
+     * Data-path byte total as it read at the previous watchdog decision, so a
+     * failed probe can be checked against whether anything is actually moving.
+     * See [dataPathBytes] and DATA_PATH_ALIVE_BYTES.
+     */
+    private var lastDataPathBytes = -1L
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -303,6 +315,10 @@ class AetherVpnService : VpnService() {
         // listener - probing 1819 there measured stage 1 alone and reported a
         // number that had nothing to do with what the user was browsing through.
         PingMonitor.setTunnelPort(port)
+        // The warm probe session belongs to the OLD pipeline; a retarget or a
+        // server rotation invalidates it. Dropping it here costs one dial and
+        // stops the badge reporting a dead connection's timeout as latency.
+        PingMonitor.reset()
         AetherController.setState(ConnectionState.Connected("$SOCKS_HOST:$port"))
         updateNotification(getString(R.string.state_connected))
         DiagnosticsLog.i(
@@ -323,7 +339,18 @@ class AetherVpnService : VpnService() {
         // PsiphonTransport already masks its own rotation window; this is the
         // second, dumber net underneath it, and it costs one extra second of
         // patience in the case that really is dead.
+        // 1.2.8 MEDIA-STALL FIX: liveness is not health. Everything above only
+        // ever asked "is the Psiphon library still running?", and it always was
+        // -- the stall the user reported (fine for a minute, then a video pins
+        // the ping at ~2000 ms and the session carries nothing at all, while
+        // both stages and every port stay up) is invisible to that question. So
+        // a chained session now ALSO gets the end-to-end probe, aimed at the
+        // pipeline's own listener, which is the exact path the user's traffic
+        // takes. Two consecutive dead readings rebuild the session instead of
+        // leaving the user to toggle the switch by hand.
         var transportDead = 0
+        var pipelineDead = 0
+        var nextPipelineProbe = SystemClock.elapsedRealtime() + PIPELINE_PROBE_INTERVAL_MS
         while (currentScopeActive() && engine?.isAlive() == true) {
             if (transport.isAlive()) {
                 transportDead = 0
@@ -337,6 +364,66 @@ class AetherVpnService : VpnService() {
                         "before rebuilding the session.",
                 )
             }
+
+            if (SystemClock.elapsedRealtime() >= nextPipelineProbe &&
+                PsiphonHealth.isSettling()
+            ) {
+                // A deliberate exit rotation is in flight: nothing can be dialled
+                // through it for a few seconds BY DESIGN. Probing it now measures
+                // the repair, not the fault. See PsiphonHealth.isSettling().
+                if (pipelineDead > 0) pipelineDead = 0
+                val settleFor = (PsiphonHealth.settlingUntil() - System.currentTimeMillis())
+                    .coerceIn(0L, PIPELINE_PROBE_INTERVAL_MS)
+                nextPipelineProbe =
+                    SystemClock.elapsedRealtime() + settleFor + PIPELINE_PROBE_RETRY_MS
+            } else if (SystemClock.elapsedRealtime() >= nextPipelineProbe) {
+                // Sampled on EVERY probe decision so the delta always covers the
+                // interval since the last one, success or failure.
+                val dataPathMoving = dataPathIsMoving()
+                if (probeTunnelCycle(port)) {
+                    if (pipelineDead > 0) {
+                        DiagnosticsLog.i(
+                            TAG,
+                            "${profile.backend.pipelineLabel} is carrying traffic again.",
+                        )
+                    }
+                    pipelineDead = 0
+                    nextPipelineProbe = SystemClock.elapsedRealtime() + PIPELINE_PROBE_INTERVAL_MS
+                } else if (dataPathMoving) {
+                    // 1.2.8-r3: A PROBE IS AN OPINION, THE METER IS A FACT.
+                    //
+                    // The r2 log shows the old code tearing down a session that
+                    // was moving hundreds of kilobytes (Psiphon's own
+                    // TotalBytesTransferred: received 703150, sent 385706)
+                    // because one probe destination timed out. A path carrying
+                    // traffic is not wedged, by definition, so the verdict is
+                    // now gated on the tunnel core's byte counters and a probe
+                    // failure alone can never rebuild anything.
+                    if (pipelineDead > 0) pipelineDead = 0
+                    DiagnosticsLog.i(
+                        TAG,
+                        "${profile.backend.pipelineLabel} probe did not answer but the data " +
+                            "path is still carrying traffic - not a wedge, leaving the session " +
+                            "alone.",
+                    )
+                    nextPipelineProbe = SystemClock.elapsedRealtime() + PIPELINE_PROBE_INTERVAL_MS
+                } else {
+                    pipelineDead++
+                    DiagnosticsLog.w(
+                        TAG,
+                        "${profile.backend.pipelineLabel} is up but carries nothing " +
+                            "($pipelineDead/$PIPELINE_DEAD_CONFIRMATIONS).",
+                    )
+                    if (pipelineDead >= PIPELINE_DEAD_CONFIRMATIONS) {
+                        DiagnosticsLog.w(TAG, "Rebuilding the session: the data path is wedged.")
+                        break
+                    }
+                    // Re-check sooner while it looks broken.
+                    nextPipelineProbe =
+                        SystemClock.elapsedRealtime() + PIPELINE_PROBE_RETRY_MS
+                }
+            }
+
             delay(1_000L)
         }
         if (currentScopeActive()) {
@@ -656,8 +743,21 @@ class AetherVpnService : VpnService() {
                 // restart the engine only on SUSTAINED failure; see
                 // probeTunnelCycle() for why the bar is deliberately high.
                 if (engine?.isAlive() == true) {
+                    val dataPathMoving = dataPathIsMoving()
                     if (probeTunnelCycle()) {
                         probeFailures = 0
+                    } else if (dataPathMoving) {
+                        // Same rule as the chained watchdog: see the comment
+                        // there. A tunnel that is moving bytes is not dead, and
+                        // restarting the engine under a live stream is exactly
+                        // the "it disconnects and comes back over and over"
+                        // symptom this watchdog was blamed for.
+                        probeFailures = 0
+                        DiagnosticsLog.i(
+                            TAG,
+                            "Watchdog: probe did not answer but the tunnel is still carrying " +
+                                "traffic - leaving the engine alone.",
+                        )
                     } else if (++probeFailures >= WATCHDOG_FAIL_CYCLES) {
                         DiagnosticsLog.w(
                             TAG,
@@ -706,7 +806,70 @@ class AetherVpnService : VpnService() {
     private fun currentScopeActive(): Boolean = runJob?.isActive ?: false
 
     private fun establishTun(profile: ConnectionProfile) {
-        // User-tunable MTU (defaults to 1280 — safe for Iranian mobile/DPI).
+        // 1.2.7-r3: a chained session's exit is a Psiphon server, and those are
+        // IPv4-only in practice. See [buildTun] for why the TUN then carries no
+        // IPv6 ADDRESS while still routing ::/0.
+        var withoutIpv6Address = profile.backend.isChained
+        var descriptor = runCatching { buildTun(profile, withoutIpv6Address).establish() }
+            .getOrNull()
+        if (descriptor == null && withoutIpv6Address) {
+            // Some ROMs refuse an interface that routes a family it has no
+            // address for. Falling back keeps the mode working exactly as it did
+            // before; the front's AAAA suppression then carries the fix alone.
+            DiagnosticsLog.w(
+                TAG,
+                "This device would not establish an IPv4-only-addressed TUN; re-establishing " +
+                    "with the IPv6 address. AAAA suppression in the Psiphon front still applies.",
+            )
+            withoutIpv6Address = false
+            descriptor = runCatching { buildTun(profile, false).establish() }.getOrNull()
+        }
+        tun = descriptor ?: throw IllegalStateException("Failed to establish the VPN interface")
+
+        val mtu = profile.mtu.coerceIn(576, 9000)
+        DiagnosticsLog.i(
+            TAG,
+            "TUN established: ipv4=${TunnelConfig.TUN_IPV4}/${TunnelConfig.TUN_IPV4_PREFIX} " +
+                "ipv6=" + (
+                if (withoutIpv6Address) {
+                    "none (::/0 routed, so nothing leaks and the resolver stops returning AAAA)"
+                } else {
+                    "${TunnelConfig.TUN_IPV6}/${TunnelConfig.TUN_IPV6_PREFIX}"
+                }
+                ) + " mtu=$mtu split=${profile.splitMode} apps=${profile.splitApps.size} " +
+                "dns=${TunnelConfig.DNS_SERVERS}",
+        )
+    }
+
+    /**
+     * Builds the TUN interface.
+     *
+     * ## Why [withoutIpv6Address] exists (1.2.7-r3 root-cause fix)
+     *
+     * The TUN used to carry an IPv6 address AND a `::/0` route unconditionally.
+     * The route is right - it is what stops IPv6 from leaking past the tunnel with
+     * the phone's real address, which is what produces a sanctions page instead of
+     * the exit's answer. The ADDRESS is what causes the damage: it is the single
+     * thing that tells Android's resolver "this network has IPv6", and from that
+     * moment `getaddrinfo` returns AAAA records to every app on the device and
+     * Happy Eyeballs prefers them. A chained session's exit is a Psiphon server,
+     * and those cannot dial IPv6, so every one of those preferences is a
+     * connection attempt that has to fail before the app tries IPv4 - and the apps
+     * in the report (Gemini, ChatGPT, CapCut, TikTok) do not retry, they say "no
+     * internet". The field log counted 65 of those refusals in two minutes.
+     *
+     * Dropping just the address is exactly the right lever, because Android's own
+     * resolver already does the work: `netd` decides whether to hand out AAAA by
+     * testing whether the network has a usable IPv6 SOURCE address. With the route
+     * present but no address, that test fails, AAAA is filtered per-network by the
+     * platform, every app settles on IPv4 by itself - and `::/0` still swallows any
+     * IPv6 an app produces on its own, so there is still no leak.
+     *
+     * Plain Aether keeps its IPv6 address: WARP has real, working IPv6 and there is
+     * nothing to protect against.
+     */
+    private fun buildTun(profile: ConnectionProfile, withoutIpv6Address: Boolean): Builder {
+        // User-tunable MTU (defaults to 1280 -- safe for Iranian mobile/DPI).
         // Clamped to a sane range so a bad saved value can't break establish().
         val mtu = profile.mtu.coerceIn(576, 9000)
         val builder = Builder()
@@ -714,14 +877,40 @@ class AetherVpnService : VpnService() {
             .setMtu(mtu)
             // The TUN address MUST match hev's tunnel.ipv4/ipv6 (see writeHevConfig).
             .addAddress(TunnelConfig.TUN_IPV4, TunnelConfig.TUN_IPV4_PREFIX)
-            .addAddress(TunnelConfig.TUN_IPV6, TunnelConfig.TUN_IPV6_PREFIX)
             .addRoute("0.0.0.0", 0)
+
+        if (!withoutIpv6Address) {
+            builder.addAddress(TunnelConfig.TUN_IPV6, TunnelConfig.TUN_IPV6_PREFIX)
+        }
 
         // IPv6 LEAK PROTECTION (1.2.4): on by default -- the v6 default
         // route keeps IPv6 traffic inside the tunnel. Can be disabled for
         // networks where a default v6 route breaks connectivity.
-        if (profile.ipv6LeakProtection) {
+        //
+        // 1.2.7-r3 ROOT-CAUSE FIX (the "it shows a sanctions error" report): in a
+        // CHAINED session that switch is not honoured. Without a ::/0 route the
+        // phone's real IPv6 address is used directly for every AAAA destination,
+        // so Gemini, ChatGPT and every sanctioned service sees the user's actual
+        // address and answers with a country block - while the app still says
+        // Connected, and while the very same session works perfectly from a
+        // USB-tethered laptop, which has no IPv6 at all. That is not "a network
+        // where v6 breaks connectivity", it is a leak with a user-visible
+        // consequence, so here the route is unconditional.
+        //
+        // Nothing is lost by forcing it: with no IPv6 address on the interface the
+        // device does not ask for AAAA in the first place, and the front answers
+        // whatever IPv6 an app produces anyway in microseconds.
+        val forceIpv6Route = profile.backend.isChained
+        if (profile.ipv6LeakProtection || forceIpv6Route) {
             builder.addRoute("::", 0)
+            if (forceIpv6Route && !profile.ipv6LeakProtection) {
+                DiagnosticsLog.w(
+                    TAG,
+                    "IPv6 leak protection is off in the profile, but a chained session routes " +
+                        "::/0 anyway: an uncaptured IPv6 flow would leave with the phone's real " +
+                        "address and be answered with a sanctions block, not by the exit.",
+                )
+            }
         }
 
         // KILL SWITCH (1.2.4): a blocking interface never falls back to
@@ -739,15 +928,7 @@ class AetherVpnService : VpnService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             builder.setMetered(false)
         }
-
-        tun = builder.establish()
-            ?: throw IllegalStateException("Failed to establish the VPN interface")
-        DiagnosticsLog.i(
-            TAG,
-            "TUN established: ipv4=${TunnelConfig.TUN_IPV4}/${TunnelConfig.TUN_IPV4_PREFIX} " +
-                "ipv6=${TunnelConfig.TUN_IPV6}/${TunnelConfig.TUN_IPV6_PREFIX} mtu=$mtu " +
-                "split=${profile.splitMode} apps=${profile.splitApps.size} dns=${TunnelConfig.DNS_SERVERS}",
-        )
+        return builder
     }
 
     /**
@@ -870,11 +1051,15 @@ class AetherVpnService : VpnService() {
               # 1.2.4 stability: the old 60s idle timeout killed long-lived
               # sessions ("works 1-2 minutes, then no site opens").
               tcp-read-write-timeout: 300000
-              # 1.2.7-r2: was 120000. A media session leaves hundreds of dead UDP
-              # associations behind (QUIC attempts that are deliberately not
-              # carried, see PsiphonSocksFront), and pinning each of them for two
-              # minutes wastes association slots the live flows need.
-              udp-read-write-timeout: 60000
+              # 1.2.7-r3: back to 120000. r2 lowered this to 60 s because QUIC was
+              # not carried, so UDP/443 associations were all dead weight. Now that
+              # UDP/443 rides the bulk lane (see PsiphonSocksFront.CARRY_QUIC) a
+              # live QUIC connection can legitimately idle: a paused video, a
+              # backgrounded app, an idle HTTP/3 pool. Reaping it at 60 s forces a
+              # new association with a new source port, which the peer sees as a
+              # different client and answers with a fresh handshake - the "effects
+              # never load / feed stops mid-scroll" symptom.
+              udp-read-write-timeout: 120000
               # 1.2.7-r2: a video player opens flows in bursts of dozens; the
               # default descriptor budget is what runs out first when it does.
               limit-nofile: 65535
@@ -909,6 +1094,7 @@ class AetherVpnService : VpnService() {
             Diagnostics.resetChecks()
             EngineMeta.reset()
             PingMonitor.resetTunnelPort()
+            PingMonitor.reset()
             AetherController.setState(ConnectionState.Idle)
             AetherTileService.requestUpdate(this@AetherVpnService)
             stopForegroundCompat()
@@ -942,28 +1128,108 @@ class AetherVpnService : VpnService() {
      * session still recovers automatically, and MASQUE's in-engine reconnect
      * loop gets room to finish before the app steps in.
      */
-    private suspend fun probeTunnelCycle(): Boolean {
+    private suspend fun probeTunnelCycle(port: Int = SOCKS_PORT): Boolean {
+        registerSelfProbes()
         repeat(PROBE_ATTEMPTS) { attempt ->
-            if (probeTunnelOnce(PROBE_TARGETS[attempt % PROBE_TARGETS.size])) return true
+            if (probeTunnelOnce(PROBE_TARGETS[attempt % PROBE_TARGETS.size], port)) return true
             if (attempt < PROBE_ATTEMPTS - 1) delay(PROBE_RETRY_GAP_MS)
         }
         return false
     }
 
-    /** Single TCP connect to [target] ("host:port") THROUGH the engine's local SOCKS5 listener. */
-    private fun probeTunnelOnce(target: String): Boolean = runCatching {
+    /**
+     * Tells [PsiphonHealth] which destinations belong to the app's own health
+     * checks, so a refusal of one can never be read as "this exit filters".
+     * See [PROBE_TARGETS].
+     */
+    private fun registerSelfProbes() {
+        if (selfProbesRegistered) return
+        selfProbesRegistered = true
+        for (target in PROBE_TARGETS) {
+            PsiphonHealth.registerSelfProbe(target.first, target.second)
+        }
+        PingMonitor.probeTargets().forEach { (host, probePort) ->
+            PsiphonHealth.registerSelfProbe(host, probePort)
+        }
+    }
+
+    /**
+     * Cumulative bytes the device data path has carried, straight from the
+     * tunnel core's own counters, or -1 when they are unavailable.
+     *
+     * This is the ONLY honest answer to "is the data path moving?", and it is
+     * the same number in both a plain and a chained session because hev is
+     * always the thing between the TUN and the first SOCKS hop. A probe to one
+     * destination is an opinion; this is the meter.
+     */
+    private fun dataPathBytes(): Long {
+        val traffic = HevTunnel.traffic() ?: return -1L
+        return traffic.downloadBytes + traffic.uploadBytes
+    }
+
+    /**
+     * One end-to-end probe of [target] ("host:port") through the local SOCKS5
+     * listener on [port]: a real DNS query, and a real answer required back.
+     *
+     * ROOT CAUSE this fixes (1.2.8) - the whole reason "connected but nothing
+     * loads" could last until the user toggled the switch by hand. This probe
+     * used to be a bare `connect()`, and a SOCKS5 connect is answered by the
+     * engine's ACCEPT path, which is a different code path from the one that
+     * carries payload. A tunnel whose data plane was wedged still completed
+     * every handshake perfectly, so the watchdog kept marking the session
+     * healthy, forever, while not one byte moved. Requiring a full round trip
+     * means the watchdog now measures exactly what the user experiences.
+     */
+    private fun probeTunnelOnce(
+        target: Triple<String, Int, String>,
+        port: Int = SOCKS_PORT,
+    ): Boolean = runCatching {
         val proxy = java.net.Proxy(
             java.net.Proxy.Type.SOCKS,
-            java.net.InetSocketAddress(SOCKS_HOST, SOCKS_PORT),
+            java.net.InetSocketAddress(SOCKS_HOST, port),
         )
-        java.net.Socket(proxy).use {
-            it.connect(
-                java.net.InetSocketAddress(target.substringBefore(':'), target.substringAfter(':').toInt()),
+        java.net.Socket(proxy).use { socket ->
+            socket.connect(
+                java.net.InetSocketAddress(target.first, target.second),
                 PROBE_TIMEOUT_MS,
             )
+            socket.soTimeout = PROBE_TIMEOUT_MS
+            socket.tcpNoDelay = true
+
+            // A real TLS handshake on 443: ClientHello out, ServerHello +
+            // certificate + Finished back. Bytes have to make the round trip in
+            // both directions through the payload path for this to complete, and
+            // 443 is the one port an exit cannot refuse without being useless.
+            val factory = javax.net.ssl.SSLSocketFactory.getDefault()
+                as javax.net.ssl.SSLSocketFactory
+            val tls = factory.createSocket(socket, target.third, target.second, false)
+                as javax.net.ssl.SSLSocket
+            tls.soTimeout = PROBE_TIMEOUT_MS
+            try {
+                tls.startHandshake()
+                tls.session.isValid
+            } finally {
+                runCatching { tls.close() }
+            }
         }
-        true
     }.getOrDefault(false)
+
+    /**
+     * True when the device data path has carried real traffic since the previous
+     * call, i.e. when a failed probe cannot possibly mean "wedged".
+     *
+     * Deliberately stateful and deliberately cheap: it reads the tunnel core's
+     * cumulative counters and compares them with the last reading. Unavailable
+     * counters return false, so a platform without them behaves exactly as
+     * before instead of becoming un-restartable.
+     */
+    private fun dataPathIsMoving(): Boolean {
+        val now = dataPathBytes()
+        val previous = lastDataPathBytes
+        lastDataPathBytes = now
+        if (now < 0 || previous < 0) return false
+        return now - previous >= DATA_PATH_ALIVE_BYTES
+    }
 
     /**
      * KILL SWITCH lockdown (1.2.4): stop the engine and the forwarder but
@@ -1149,24 +1415,98 @@ class AetherVpnService : VpnService() {
          */
         const val TRANSPORT_DEAD_CONFIRMATIONS = 5
 
-        /** Watchdog probe cadence while the tunnel is up (1.2.4). */
-        private const val WATCHDOG_INTERVAL_MS = 30_000L
-
         /**
-         * Consecutive failed checks before the engine is restarted (1.2.4
-         * hardening): three failed checks = 90 s+ of proven dead tunnel, so
-         * only a genuinely dead session is restarted.
+         * Watchdog probe cadence while the tunnel is up.
+         *
+         * 1.2.8: 30 s -> 15 s. The probe now proves that bytes actually make the
+         * round trip (see probeTunnelOnce), so a failure means something, and
+         * waiting half a minute between meaningful checks is time the user
+         * spends staring at a tunnel that says Connected and does nothing.
          */
-        private const val WATCHDOG_FAIL_CYCLES = 3
+        private const val WATCHDOG_INTERVAL_MS = 15_000L
 
         /**
-         * Attempts per watchdog check, rotating over anycast resolvers so one
+         * Consecutive failed checks before the engine is restarted. 1.2.8: 3 ->
+         * 2, for the same reason. Each check is already three round trips over
+         * three different resolvers, so two failed checks is six independent
+         * failures - plenty of evidence, and roughly half the dead air.
+         */
+        private const val WATCHDOG_FAIL_CYCLES = 2
+
+        /**
+         * Attempts per watchdog check, rotating over anycast endpoints so one
          * blocked or slow target can never fake a dead tunnel (1.2.4 fix).
          */
         private const val PROBE_ATTEMPTS = 3
-        private val PROBE_TARGETS = arrayOf("1.1.1.1:53", "1.0.0.1:53", "9.9.9.9:53")
+
+        /**
+         * Probe destinations as `ip`, `port`, `sni`.
+         *
+         * ## ROOT CAUSE this fixes (1.2.8-r3) - the self-inflicted reconnect loop
+         *
+         * These used to be `1.1.1.1:53`, `1.0.0.1:53`, `9.9.9.9:53`: DNS over
+         * **TCP port 53**. A large share of Psiphon exits refuse TCP/53 outright,
+         * and the app's own front says so in the log:
+         *
+         * ```text
+         * PsiphonSocksFront this server does not allow outbound TCP/53
+         * Psiphon: LocalProxyError ... ssh: rejected: administratively prohibited
+         * ```
+         *
+         * So on those exits EVERY watchdog check failed, forever, on a tunnel
+         * that was carrying traffic normally. The 1.2.8-r2 field log has both
+         * verdicts one second apart, which is the proof:
+         *
+         * ```text
+         * 09:33:36.081 diag: device dns via socks5 udp = true
+         * 09:33:36.353 diag: dns+http OK, exit ip=146.59.70.6 cc=PL   <- real paths: fine
+         * 09:33:36.288 ssh: rejected: administratively prohibited      <- probe: refused
+         * ...
+         * 09:34:39.090 ping: Latency probe failed (viaTunnel=true): Connect timed out
+         * 09:34:59.391 PsiphonHealth ... refused 6 different destinations in 45s
+         * 09:34:59.396 PsiphonSocksFront udpgw session closed
+         * 09:35:03.298 Rebuilding the session: the data path is wedged
+         * ```
+         *
+         * The probe failed, the failures also convicted the exit as a filtering
+         * server, the rotation dropped the udpgw association (killing every
+         * UDP/QUIC flow on the device) and then the pipeline watchdog tore the
+         * whole session down. On a cadence. Which is precisely what the user
+         * reported for *every* app and site: ping spikes, it drops, it comes
+         * back, it repeats - and why nothing with a long-lived stream (a live
+         * dubbing session, a video) ever survived a minute.
+         *
+         * Port 443 is the one port every exit must allow, and a TLS handshake to
+         * it is a genuine payload round trip through the data plane, which is
+         * what the probe was supposed to be measuring in the first place. Each
+         * target is also registered with [PsiphonHealth] so it can never count
+         * as evidence against a server again, whatever port it lands on.
+         */
+        private val PROBE_TARGETS = arrayOf(
+            Triple("1.1.1.1", 443, "cloudflare-dns.com"),
+            Triple("8.8.8.8", 443, "dns.google"),
+            Triple("9.9.9.9", 443, "dns.quad9.net"),
+        )
         private const val PROBE_TIMEOUT_MS = 8_000
-        private const val PROBE_RETRY_GAP_MS = 1_500L
+        private const val PROBE_RETRY_GAP_MS = 1_000L
+
+        /**
+         * Bytes the device data path must have carried since the previous check
+         * for a failed probe to be dismissed as "busy, not broken".
+         *
+         * A wedged tunnel moves nothing at all; anything above idle keepalive
+         * noise means the path works and the probe is the thing that is wrong.
+         */
+        private const val DATA_PATH_ALIVE_BYTES = 16 * 1024L
+
+        /** How often a CHAINED session's full pipeline is probed end to end (1.2.8). */
+        private const val PIPELINE_PROBE_INTERVAL_MS = 15_000L
+
+        /** And how soon it is re-probed once a check has failed. */
+        private const val PIPELINE_PROBE_RETRY_MS = 5_000L
+
+        /** Consecutive dead pipeline readings before the session is rebuilt. */
+        private const val PIPELINE_DEAD_CONFIRMATIONS = 2
 
         /**
          * How long to wait for the previous engine to release the local SOCKS5

@@ -98,8 +98,8 @@ android {
         applicationId = "studio.cluvex.aether"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "1.2.7"
+        versionCode = 12
+        versionName = "1.2.8"
 
         ndk {
             // We ship arm64 (primary) and arm builds.
@@ -122,6 +122,26 @@ android {
         val coreVersion = rootProject.file("native/aether/CORE_VERSION")
             .takeIf { it.exists() }?.readText()?.trim().orEmpty().ifBlank { "unknown" }
         buildConfigField("String", "CORE_VERSION", "\"$coreVersion\"")
+
+        // ------------------------------------------------------------------
+        // 1.2.8-r5 BUILD IDENTITY.
+        //
+        // versionName stays "1.2.8" and versionCode stays 12, as required. That
+        // is exactly the problem this field solves rather than papers over: r2,
+        // r3 and r4 were all "1.2.8 (12)", the engine banner printed only the
+        // upstream core version (1.8.0) which is identical in all of them, and
+        // so an APK from two rounds ago is indistinguishable from today's - in
+        // the UI, in the log, and on the releases page.
+        //
+        // The r4 field log is the receipt: five separate strings in it belong to
+        // the r3 build, so a whole diagnosis round analysed a binary that
+        // predates the fix under test. PATCH_LEVEL is the identity that was
+        // missing. It is written into the log on every connect, shown in the
+        // About card, cross-checked against the stamp inside libaether.so, and
+        // asserted by CI before a release is published.
+        val patchLevel = rootProject.file("PATCHLEVEL")
+            .takeIf { it.exists() }?.readText()?.trim().orEmpty().ifBlank { "unstamped" }
+        buildConfigField("String", "PATCH_LEVEL", "\"$patchLevel\"")
     }
 
     // Both native cores (libhev-socks5-tunnel.so + libaether.so) are prebuilt by

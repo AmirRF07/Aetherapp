@@ -260,6 +260,52 @@ detect_aether_crate() {
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# 1.2.8-r5: build provenance.
+#
+# WHY. r2, r3 and r4 all shipped as versionName 1.2.8 / versionCode 12, and the
+# engine banner printed only the upstream core version (1.8.0), identical in all
+# three. Nothing anywhere could tell two revisions apart, and the r4 field log
+# proves the consequence: five separate strings in it belong to the r3 engine, so
+# an entire diagnosis round was spent analysing a binary that predated the fix
+# being tested. That is not a mistake anyone can be careful enough to avoid; it
+# is a missing build identity, and this is the fix.
+#
+# The repo-root PATCHLEVEL file is stamped into libaether.so by build.rs, and
+# verify_patch_stamp() below greps the finished, stripped .so for it. A stale or
+# unstamped engine fails the build HERE, loudly, instead of being shipped and
+# field-tested for a week.
+APP_PATCHLEVEL="${APP_PATCHLEVEL:-}"
+if [ -z "${APP_PATCHLEVEL}" ] && [ -f "${PROJECT_DIR}/PATCHLEVEL" ]; then
+  APP_PATCHLEVEL="$(tr -d '[:space:]' < "${PROJECT_DIR}/PATCHLEVEL")"
+fi
+if [ -z "${APP_PATCHLEVEL}" ]; then
+  echo "ERROR: no PATCHLEVEL at ${PROJECT_DIR}/PATCHLEVEL and APP_PATCHLEVEL is unset." >&2
+  echo "       The engine would build unidentifiable. Refusing." >&2
+  exit 1
+fi
+export APP_PATCHLEVEL
+echo "==> [aether] app patch level: ${APP_PATCHLEVEL}"
+
+# The literal build.rs embeds. Must match AETHER_BUILD_STAMP there exactly.
+PATCH_STAMP="AETHER-BUILD-STAMP:${APP_PATCHLEVEL}"
+
+# verify_patch_stamp <abi> <so>
+verify_patch_stamp() {
+  local abi="$1" so="$2"
+  if ! grep -qa -- "${PATCH_STAMP}" "${so}"; then
+    echo "ERROR: [${abi}] libaether.so does not contain '${PATCH_STAMP}'." >&2
+    echo "       The engine that was just built is NOT this patch level. Most likely" >&2
+    echo "       causes: build.rs did not run (is 'build = \"build.rs\"' still in" >&2
+    echo "       Cargo.toml?), a stale artifact was copied, or the core-sync step" >&2
+    echo "       reverted the app patches. Do NOT ship this." >&2
+    echo "       Stamps actually present in the binary:" >&2
+    grep -ao 'AETHER-BUILD-STAMP:[0-9A-Za-z.\-]*' "${so}" 2>/dev/null | sort -u | sed 's/^/         /' >&2 || true
+    exit 1
+  fi
+  echo "    [${abi}] build stamp verified: ${PATCH_STAMP}"
+}
+
 build_aether() {
   local crate
   crate="$(detect_aether_crate || true)"
@@ -272,6 +318,15 @@ build_aether() {
   echo "==> [aether] binary crate: ${crate}"
 
   export CARGO_TARGET_DIR="${AETHER_SRC}/target"
+
+  # Never let a previous run's engine survive into this APK. jniLibs is
+  # git-ignored and therefore invisible in a diff; a leftover libaether.so from
+  # an earlier revision is precisely the artifact that would reproduce the r4
+  # situation on a local build.
+  local abi
+  for abi in "${ABIS[@]}"; do
+    rm -f "${JNI_DIR}/${abi}/libaether.so"
+  done
 
   local bin_name
   bin_name="$(grep -m1 -E '^name[[:space:]]*=' "${crate}/Cargo.toml" \
@@ -301,6 +356,8 @@ build_aether() {
     mkdir -p "${JNI_DIR}/${abi}"
     cp "${artifact}" "${JNI_DIR}/${abi}/libaether.so"
     "${NDK_TOOLCHAIN}/llvm-strip" "${JNI_DIR}/${abi}/libaether.so" 2>/dev/null || true
+    # Checked AFTER stripping, because stripping is what the shipped file gets.
+    verify_patch_stamp "${abi}" "${JNI_DIR}/${abi}/libaether.so"
     echo "    installed libaether.so for ${abi}"
   }
 

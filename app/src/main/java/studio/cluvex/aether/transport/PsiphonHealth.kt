@@ -246,6 +246,56 @@ object PsiphonHealth {
     /** Refused destination -> first time it was refused inside the current window. */
     private val refusedTargets = ConcurrentHashMap<String, Long>()
 
+    /**
+     * Destinations THIS APP dials for its own health checks, which must never be
+     * allowed to convict a server.
+     *
+     * ## ROOT CAUSE this fixes (1.2.8-r3)
+     *
+     * The watchdog and the latency badge both dialled anycast resolvers on
+     * **TCP port 53**, and a large share of Psiphon exits refuse that port
+     * outright (`ssh: rejected: administratively prohibited`). Three probe
+     * targets per watchdog cycle plus the badge is four DIFFERENT destinations
+     * refused every fifteen seconds, for free, on a completely healthy server -
+     * and [DISTINCT_TARGETS_TRIGGER] is six.
+     *
+     * The field log for 1.2.8-r2 shows the result end to end. At 09:33:36 the
+     * connectivity self-test passes over the paths real traffic uses
+     * (`dns+http OK, exit ip=146.59.70.6 cc=PL`). One quarter of a second later
+     * the first probe is refused. Forty-five seconds after that:
+     *
+     * ```text
+     * 09:34:59.391 refused 6 different destinations in 45s ... excluded for the
+     *              rest of this session
+     * 09:34:59.396 udpgw session closed        <- every UDP/QUIC flow dies here
+     * 09:35:03.297 up but carries nothing (2/2)
+     * 09:35:03.298 Rebuilding the session: the data path is wedged
+     * ```
+     *
+     * Nothing was wedged. The app convicted its exit, dropped every UDP
+     * association and then tore down its own working pipeline, on a schedule,
+     * forever - which is the "ping spikes, it disconnects, it comes back, over
+     * and over" report, and it is why a long-lived symmetric stream (live
+     * dubbing) could never survive more than about a minute.
+     *
+     * The probes now use port 443 (see AetherVpnService and PingMonitor), and
+     * they register here so that they can never be counted as evidence about the
+     * server no matter which port they end up on.
+     */
+    private val selfProbeTargets = ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Declares `host:port` as one of the app's own health-probe destinations.
+     * Idempotent, and safe to call before a session exists.
+     */
+    fun registerSelfProbe(host: String, port: Int) {
+        selfProbeTargets.add("$host:$port")
+    }
+
+    /** True when `host:port` is one of the app's own probes. */
+    fun isSelfProbe(host: String, port: Int): Boolean =
+        selfProbeTargets.contains("$host:$port")
+
     /** Window start, and the tunnel's failure counter as it read at that moment. */
     private val windowStartedAt = AtomicLong(0)
     private val windowBaseFailures = AtomicLong(-1)
@@ -298,6 +348,40 @@ object PsiphonHealth {
     fun isFiltering(serverId: String): Boolean = filtering.contains(serverId)
 
     /**
+     * `elapsedRealtime`-independent wall clock instant until which a deliberate
+     * in-place rotation is still settling, or 0 when none is in flight.
+     */
+    fun settlingUntil(): Long = settleUntil.get()
+
+    /**
+     * True while a deliberate rotation is still settling.
+     *
+     * ## ROOT CAUSE this fixes (1.2.8-r3) - the two watchdogs fighting
+     *
+     * A rotation is a CONTROLLED exit change: the pipeline stays up, only the
+     * Psiphon server moves, and it takes a few seconds during which nothing can
+     * be dialled. [PsiphonTransport.isAlive] already masks that window. The
+     * service's pipeline probe did not, and it is the one holding the axe. The
+     * 1.2.8-r2 field log catches them four seconds apart:
+     *
+     * ```text
+     * 09:34:59.393 rotating off server n+WE7s6A - reconnect 1/4.
+     *              The pipeline stays up; only the exit server changes.
+     * 09:35:00.690 Dial ... no active tunnels          <- expected, mid-rotation
+     * 09:35:03.297 up but carries nothing (2/2)
+     * 09:35:03.298 Rebuilding the session: the data path is wedged
+     * 09:35:03.331 hev-socks5-tunnel stop requested    <- the whole session dies
+     * ```
+     *
+     * The repair was working. The watchdog counted the repair as the failure and
+     * destroyed everything instead, which turns one clean 3-second exit change
+     * into a full teardown, a fresh Psiphon bootstrap and 10+ seconds of dead
+     * air - the "it disconnects and comes back, over and over" report, on a
+     * loop, because the replacement session hits the same sequence.
+     */
+    fun isSettling(): Boolean = System.currentTimeMillis() < settleUntil.get()
+
+    /**
      * One destination Psiphon refused to dial, reported by [PsiphonSocksFront].
      *
      * Keyed by `host:port` so a browser retrying the same blocked host twenty
@@ -306,6 +390,9 @@ object PsiphonHealth {
      */
     fun onDestinationRefused(host: String, port: Int) {
         if (action.get() == null) return
+        // 1.2.8-r3: our own probes are not evidence about anything but us.
+        // See [selfProbeTargets] for the log that made this mandatory.
+        if (isSelfProbe(host, port)) return
         val now = System.currentTimeMillis()
         // Refusals draining out of a tunnel we already abandoned say nothing
         // about the one that replaced it.
