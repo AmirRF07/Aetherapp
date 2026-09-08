@@ -67,6 +67,10 @@
     <string name="diag_problem">مشکلی شناسایی شد — بررسی ناموفق را ببینید</string>
     <string name="diag_idle">برای بررسی اتصال، تست را اجرا کنید</string>
     <string name="diag_empty_logs">هنوز لاگی نیست. متصل شوید یا تست را اجرا کنید.</string>
+    <!-- 1.2.9-r3 (ممیزی بخش ۶): لاگی که اشتراک‌گذاری عمومی‌اش بی‌خطر است. -->
+    <string name="diag_copy_redacted">کپی لاگ بدون آدرس‌ها (بی‌خطر برای اشتراک)</string>
+    <string name="diag_copied_redacted">لاگ پاک‌سازی‌شده کپی شد — آی‌پی‌ها و شناسه‌ها حذف شدند</string>
+    <string name="diag_log_sealed">لاگی که روی این دستگاه نگه داشته می‌شود با کلید همین دستگاه رمزنگاری شده است.</string>
 
     <!-- About panel -->
     <string name="about_title">درباره</string>
@@ -95,7 +99,13 @@
     <string name="share_starting">در حال راه‌اندازی اشتراک‌گذاری… اگر بیش از چند ثانیه طول کشید، سوییچ را خاموش و دوباره روشن کنید.</string>
     <string name="share_need_wifi">برای اشتراک‌گذاری به وای‌فای وصل شوید یا هات‌اسپات را روشن کنید.</string>
     <string name="share_howto">در دستگاه دیگر (روی همان شبکه)، تنظیمات پراکسی را باز کنید و یکی از این آدرس‌ها را وارد کنید:</string>
-    <string name="share_warning">تا وقتی اشتراک‌گذاری روشن است، هر کسی در این شبکه می‌تواند از پراکسی استفاده کند. فقط در شبکه‌های مطمئن استفاده کنید.</string>
+    <string name="share_warning">فقط دستگاه‌هایی از همین شبکهٔ محلی که نام کاربری و رمز زیر را وارد کنند می‌توانند از پراکسی استفاده کنند. ترافیک آن‌ها هم با آی‌پی خروجی شما بیرون می‌رود، پس فقط با دستگاه‌های مورد اعتماد به اشتراک بگذارید.</string>
+    <!-- 1.2.9-r3 (ممیزی F-5): شنونده‌های اشتراکی، کلاینت‌های راه دور را احراز هویت می‌کنند. -->
+    <string name="share_auth_note">دستگاه دیگر باید با این مشخصات به پراکسی وارد شود:</string>
+    <string name="share_user_label">نام کاربری پراکسی</string>
+    <string name="share_pass_label">رمز پراکسی</string>
+    <string name="share_pass_rotate">ساخت رمز جدید</string>
+    <string name="share_pass_rotated">رمز جدید پراکسی ساخته شد</string>
 
     <string name="traffic_download">دانلود</string>
     <string name="traffic_upload">آپلود</string>
@@ -170,6 +180,15 @@
     <!-- درباره: نسخهٔ هسته (همتای نسخهٔ ویندوز) -->
     <string name="about_core_version">نسخهٔ هسته (Core) %1$s</string>
     <string name="about_patch_level">نسخهٔ بیلد: %1$s</string>
+    <!-- 1.2.9-r3 (کاهش ریسک F-1): آیا این همان بیلدی است که منتشر شده؟ -->
+    <string name="about_signer">گواهی امضا: %1$s</string>
+    <string name="about_signer_ok">با گواهی رسمی Aether یکسان است.</string>
+    <string name="about_signer_bad">این نسخه با کلید شخص دیگری امضا شده، نه توسط پروژهٔ Aether. یک برنامهٔ VPN همهٔ ترافیک شما را می‌بیند — از صفحهٔ رسمی انتشار دوباره نصب کنید.</string>
+    <string name="about_signer_unpinned">اثر انگشت رسمی در این بیلد کامپایل نشده، پس همین‌جا قابل بررسی نیست.</string>
+    <string name="about_signer_unknown">سیستم گواهی امضایی برای این برنامه گزارش نکرد.</string>
+    <string name="about_apk_hash">‏SHA-256 فایل APK: %1$s</string>
+    <string name="about_apk_hash_loading">در حال محاسبه…</string>
+    <string name="about_verify_hint">پیش از اعتماد به یک به‌روزرسانی، این هش را با هشی که در صفحهٔ رسمی انتشار برای فایل شما اعلام شده مقایسه کنید.</string>
 
     <!-- قابلیت‌های هستهٔ ۱.۵.۰ -->
     <string name="section_zerotrust">Zero Trust (سازمانی)</string>
@@ -276,6 +295,8 @@
     <string name="ping_quality_offline">متصل نیست</string>
 
     <!-- ۱.۲.۷: صفحهٔ تنظیمات، انتخاب زبان در خود برنامه و بودجهٔ اندپوینت کش‌شده -->
+    <string name="quick_settings_title">تنظیمات تونل</string>
+    <string name="quick_settings_subtitle">اتصال، ترابری، DNS و پراکسی بالادست</string>
     <string name="settings_title">تنظیمات</string>
     <string name="settings_subtitle">اتصال، برنامه‌ها، امنیت و عیب‌یابی</string>
     <string name="settings_locked_hint">برای تغییر تنظیمات تونل ابتدا قطع کنید؛ این مقادیر هنگام اجرای موتور به آن داده می‌شوند.</string>
@@ -321,4 +342,139 @@
     <string name="reset_confirm_title">همهٔ تنظیمات بازنشانی شود؟</string>
     <string name="reset_confirm_body">هر تنظیمی به حالت پیش‌فرض برمی‌گردد؛ شامل رنج‌های اندپوینت، قواعد مسیریابی و اطلاعات عضویت سازمانی.</string>
     <string name="reset_confirm_ok">بازنشانی</string>
+    <!-- =================================================================
+         ‏۱.۲.۹ - قابلیت‌های هوش مصنوعی Gemini.
+         هر کلید این بخش باید در values/strings.xml هم وجود داشته باشد.
+         ================================================================= -->
+    <string name="ai_title">هوش مصنوعی اتر</string>
+    <string name="ai_subtitle">Gemini داخل برنامه: توضیح، بهینه‌سازی و چت</string>
+    <string name="ai_badge">AI</string>
+    <string name="cat_ai">دستیار</string>
+    <string name="cat_ai_desc">هر گزینه را توضیح می‌دهد، لاگ را می‌خواند و تنظیمات پیشنهاد می‌کند</string>
+
+    <!-- کلید -->
+    <string name="ai_section_key">کلید API جمینای</string>
+    <string name="ai_key_label">کلید API</string>
+    <string name="ai_key_hint">AIza…</string>
+    <string name="ai_key_help">کلید رایگان را از Google AI Studio بگیرید (aistudio.google.com/apikey). این کلید روی همین گوشی و رمزنگاری‌شده با کلید سخت‌افزاری ذخیره می‌شود، فقط برای گوگل فرستاده می‌شود و همیشه از داخل تونل. بازگرداندن تنظیمات برنامه آن را پاک نمی‌کند.</string>
+    <string name="ai_key_show">نمایش</string>
+    <string name="ai_key_hide">پنهان</string>
+    <string name="ai_key_paste">جای‌گذاری</string>
+    <string name="ai_key_forget">پاک کردن کلید و فهرست مدل‌ها</string>
+    <string name="ai_key_forgotten">کلید API پاک شد</string>
+    <string name="ai_test">تست اتصال به API</string>
+    <string name="ai_test_hint">کلید را بررسی می‌کند و مدل‌های مجاز آن را فهرست می‌کند</string>
+    <string name="ai_test_running">در حال تست…</string>
+    <string name="ai_test_ok">سالم است — %1$d مدل از مسیر %2$s در دسترس است</string>
+    <string name="ai_test_failed">ناموفق: %1$s</string>
+
+    <!-- مدل‌ها -->
+    <string name="ai_section_models">مدل‌هایی که کلید شما می‌تواند استفاده کند</string>
+    <string name="ai_model_label">مدل</string>
+    <string name="ai_models_count">%1$d مدل در دسترس</string>
+    <string name="ai_models_empty">هنوز مدلی پیدا نشده است. اول وصل شوید و بعد تست API را بزنید: فهرست از خودِ کلید شما خوانده می‌شود، پس دقیقاً همان مدل‌هایی را نشان می‌دهد که آن کلید اجازهٔ استفاده از آن‌ها را دارد.</string>
+    <string name="ai_models_refresh">به‌روزرسانی فهرست مدل‌ها</string>
+
+    <!-- رفتار -->
+    <string name="ai_section_behaviour">رفتار دستیار</string>
+    <string name="ai_auto_optimize">بررسی لاگ در هر بار اتصال</string>
+    <string name="ai_auto_optimize_desc">پس از هر اتصال موفق، جمینای بخشی از لاگ همین نشست را (پاک‌سازی‌شده) می‌خواند، گزارش می‌دهد که اپراتور شما با این اتصال چه می‌کند و تنظیماتی را که با آن وضعیت می‌خواند پیشنهاد می‌دهد.</string>
+    <string name="ai_auto_apply">اعمال خودکار پیشنهادها</string>
+    <string name="ai_auto_apply_desc">پیشنهادها مستقیم در تنظیمات نوشته شوند، بدون اینکه منتظر تأیید شما بمانند. به‌صورت پیش‌فرض خاموش است، چون تنظیمی که خودش عوض می‌شود از یک اشکال قابل تشخیص نیست.</string>
+    <string name="ai_hints">نمایش آیکن AI کنار گزینه‌ها</string>
+    <string name="ai_hints_desc">روی آیکن کنار هر تنظیم بزنید و جمینای می‌گوید آن تنظیم چیست، چه کاربردی دارد و چطور باید از آن استفاده کرد.</string>
+
+    <!-- چت -->
+    <string name="ai_chat_open">گفت‌وگو با جمینای</string>
+    <string name="ai_chat_subtitle">هر چیزی بپرسید، یا بگویید چه چیزی عوض شود</string>
+    <string name="ai_chat_model">مدل: %1$s</string>
+    <string name="ai_chat_empty_title">سلام، من هوش مصنوعی اتر هستم</string>
+    <string name="ai_chat_empty_body">می‌توانم هر تنظیمی در این برنامه را توضیح بدهم، لاگ همین نشست را بخوانم و تنظیمات پیشنهاد کنم، یا فقط به سؤالتان جواب بدهم.</string>
+    <string name="ai_chat_suggest_1">چرا اتصالم الان کند است؟</string>
+    <string name="ai_chat_suggest_2">روی دیتای همراه چه پروتکلی بهتر است؟</string>
+    <string name="ai_chat_suggest_3">‏MTU را توضیح بده و بهترینش را انتخاب کن</string>
+    <string name="ai_chat_suggest_4">تونل را سخت‌تر قابل تشخیص کن</string>
+    <string name="ai_chat_input_hint">از هوش مصنوعی اتر بپرسید…</string>
+    <string name="ai_chat_send">ارسال</string>
+    <string name="ai_chat_stop">توقف</string>
+    <string name="ai_chat_clear">پاک کردن گفت‌وگو</string>
+    <string name="ai_chat_thinking">در حال فکر کردن…</string>
+    <string name="ai_chat_copy">کپی پاسخ</string>
+
+    <!-- شیت توضیح -->
+    <string name="ai_explain_title">این چیست؟</string>
+    <string name="ai_explain_loading">در حال پرسیدن از جمینای…</string>
+    <string name="ai_explain_failed">%1$s</string>
+    <string name="ai_explain_retry">تلاش دوباره</string>
+
+    <!-- مشاور تنظیمات -->
+    <string name="ai_advisor_title">مشاور تنظیمات</string>
+    <string name="ai_advisor_subtitle">شبکهٔ شما چه می‌کند و چه تنظیماتی با آن می‌خواند</string>
+    <string name="ai_advisor_run">بررسی این نشست</string>
+    <string name="ai_advisor_running">در حال خواندن لاگ و تحلیل…</string>
+    <string name="ai_advisor_idle">جمینای بخشی از لاگ همین نشست را می‌خواند — بدون هیچ اطلاعات محرمانه و با آدرس‌های عمومی ماسک‌شده — و تنظیمات پیشنهاد می‌دهد. تا زمانی که «اعمال» را نزنید هیچ چیزی عوض نمی‌شود.</string>
+    <string name="ai_advisor_failed">تحلیل ممکن نشد: %1$s</string>
+    <string name="ai_advisor_dpi">به نظر می‌رسد شبکهٔ شما این کار را می‌کند</string>
+    <string name="ai_advisor_confidence">اطمینان: %1$s</string>
+    <string name="ai_advisor_no_changes">چیزی برای تغییر نیست — این نشست سالم به نظر می‌رسد.</string>
+    <string name="ai_confidence_high">بالا</string>
+    <string name="ai_confidence_medium">متوسط</string>
+    <string name="ai_confidence_low">پایین</string>
+
+    <!-- پیشنهادها -->
+    <string name="ai_changes_title">تنظیمات پیشنهادی (%1$d)</string>
+    <string name="ai_apply">اعمال</string>
+    <string name="ai_applied">اعمال شد</string>
+    <string name="ai_apply_note">تنظیمات تونل هنگام راه‌اندازی به موتور داده می‌شوند، پس این تغییرها در اتصال بعدی اثر می‌گذارند.</string>
+    <string name="ai_dismiss">بستن</string>
+
+    <!-- شرط‌های استفاده از هوش مصنوعی -->
+    <string name="ai_gate_no_key">برای استفاده از قابلیت‌های هوش مصنوعی، کلید API جمینای خود را وارد کنید.</string>
+    <string name="ai_gate_no_model">هنوز مدلی انتخاب نشده است. تست API را بزنید تا یکی برایتان انتخاب شود.</string>
+    <string name="ai_gate_disconnected">هوش مصنوعی به تونل نیاز دارد. اول وصل شوید: سرویس‌های هوش مصنوعی گوگل مستقیم در دسترس نیستند و ترافیک خودِ اتر عمداً از تونلی که می‌سازد رد نمی‌شود.</string>
+    <string name="ai_gate_wrong_mode">حالت شبکه را روی Aether → Psiphon بگذارید. سرویس‌های هوش مصنوعی گوگل آدرس‌های خروجی اتر/WARP را نمی‌پذیرند؛ به همین دلیل هوش مصنوعی فقط در حالت ترکیبی کار می‌کند.</string>
+    <string name="ai_gate_fix_key">رفتن به تنظیمات هوش مصنوعی</string>
+    <string name="ai_gate_fix_mode">رفتن به تنظیمات اتصال</string>
+
+    <!-- خطاها -->
+    <string name="ai_error_bad_key">کلید API شما پذیرفته نشد. آن را بررسی کنید و دوباره تلاش کنید.</string>
+    <string name="ai_error_rate_limit">به سقف مصرف یا محدودیت سرعت رسیدید. کمی صبر کنید و دوباره امتحان کنید.</string>
+    <string name="ai_error_no_model">این مدل برای کلید شما در دسترس نیست. فهرست مدل‌ها را به‌روز کنید.</string>
+    <string name="ai_error_transport">از داخل تونل نشد به گوگل رسید.</string>
+    <string name="ai_error_protocol">پاسخ گوگل قابل خواندن نبود.</string>
+    <string name="ai_error_blocked">جمینای از پاسخ دادن به آن خودداری کرد.</string>
+
+    <!-- توضیح شفاف -->
+    <string name="ai_privacy_title">چه چیزی از گوشی شما بیرون می‌رود</string>
+    <string name="ai_privacy_body">فقط چیزی که هر درخواست لازم دارد: متن پرسش شما، نام تنظیمی که دربارهٔ آن پرسیده‌اید و مقدارهای فعلی تنظیمات. تحلیل لاگ یک بخش پاک‌سازی‌شده از لاگ را هم اضافه می‌کند: اطلاعات محرمانه حذف و آدرس‌های عمومی تا /16 ماسک می‌شوند. همهٔ این‌ها از داخل تونل به گوگل می‌رسند، هرگز به‌صورت مستقیم.</string>
+    <string name="ai_scope_title">هوش مصنوعی چه چیزی را می‌تواند تغییر دهد</string>
+    <string name="ai_scope_body">فقط تنظیمات بهینه‌سازی: پروتکل، مبهم‌سازی، MTU، تکه‌تکه‌کردن، DNS، رفتار اتصال مجدد و مانند این‌ها. هرگز نمی‌تواند حالت شبکه، پراکسی بالادست، قواعد مسیریابی، اینکه کدام برنامه‌ها از تونل رد می‌شوند یا هیچ اطلاعات محرمانه‌ای را عوض کند — این‌ها تعیین می‌کنند کدام ترافیک محافظت می‌شود، پس در دست خودتان می‌مانند.</string>
+
+    <!-- ===== افزوده‌های هوش مصنوعی در ۱.۲.۹ ========================= -->
+    <string name="ai_error_server">سرویس هوش مصنوعی گوگل نتوانست پاسخ دهد. مشکل از سمت گوگل است، نه از اتصال شما.</string>
+    <string name="ai_error_truncated">پاسخ پیش از تمام شدن قطع شد. دوباره تلاش کنید.</string>
+    <string name="ai_advisor_unreadable">مدل دو بار پشت سر هم پاسخ را در قالبی که برنامه لازم دارد نداد. دوباره تلاش کنید یا مدل دیگری انتخاب کنید.</string>
+    <string name="ai_advisor_empty_log">هنوز چیزی در گزارش اتصال برای تحلیل وجود ندارد. اول وصل شوید، بعد تحلیل را اجرا کنید.</string>
+    <string name="ai_models_none_allowed">کلید شما به گوگل می‌رسد، اما هیچ‌کدام از مدل‌هایی که این برنامه پشتیبانی می‌کند برای آن در دسترس نیست. مدل‌های پشتیبانی‌شده:\n%1$s</string>
+    <string name="ai_models_filtered">فقط مدل‌های Flash پشتیبانی‌شده نمایش داده می‌شوند</string>
+    <string name="ai_models_help">فهرست فقط به مدل‌های سریع Flash محدود شده که روی کلید رایگان قابل‌اعتماد پاسخ می‌دهند، از جدید به قدیم. مدل‌های تصویر، ویدئو، صوت و Pro پنهان شده‌اند چون یا اینجا پاسخ نمی‌دهند یا سهمیهٔ رایگان را فوراً تمام می‌کنند.</string>
+    <string name="ai_applied_dialog_title">برای اتصال بعدی ذخیره شد</string>
+    <string name="ai_applied_dialog_body">تنظیمات جدید ذخیره شد، اما تونل همچنان با تنظیمات قبلی در حال اجراست. تنظیمات تونل هنگام شروع به موتور داده می‌شود؛ پس یک‌بار قطع و دوباره وصل کنید تا اعمال شوند.</string>
+    <string name="ai_applied_dialog_ok">متوجه شدم</string>
+    <string name="ai_explain_ask_chat">متوجه نشدید؟ از دستیار بپرسید</string>
+    <string name="ai_chat_retry">تلاش مجدد</string>
+    <string name="ai_chat_edit">ویرایش</string>
+    <string name="ai_chat_delete">حذف</string>
+    <string name="ai_chat_edited">ویرایش‌شده</string>
+    <string name="ai_chat_cancel">انصراف</string>
+    <string name="ai_chat_edit_title">ویرایش پیام</string>
+    <string name="ai_chat_edit_send">ارسال دوباره</string>
+    <string name="ai_chat_edit_note">هر چیزی پس از این پیام حذف می‌شود و دستیار به پرسش ویرایش‌شده پاسخ می‌دهد.</string>
+    <string name="ai_chat_selected">%1$d مورد انتخاب شد</string>
+    <string name="ai_chat_select_all">انتخاب همه</string>
+    <string name="ai_chat_selection_cancel">لغو انتخاب</string>
+    <string name="ai_chat_delete_selected">حذف موارد انتخاب‌شده</string>
+    <string name="ai_chat_delete_title">%1$d پیام حذف شود؟</string>
+    <string name="ai_chat_delete_body">این کار قابل بازگشت نیست. پیام‌های حذف‌شده دیگر به‌عنوان زمینهٔ گفت‌وگو برای دستیار فرستاده نمی‌شوند.</string>
+    <string name="ai_chat_delete_confirm">حذف</string>
 </resources>

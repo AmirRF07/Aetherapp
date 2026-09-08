@@ -26,12 +26,14 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,9 +47,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import studio.cluvex.aether.R
 import studio.cluvex.aether.core.ShareBridge
+import studio.cluvex.aether.data.ShareCredentials
 import studio.cluvex.aether.model.ConnectionProfile
 import studio.cluvex.aether.model.ConnectionState
 import studio.cluvex.aether.model.isConnected
@@ -58,6 +62,12 @@ import studio.cluvex.aether.model.isConnected
  * Turns the phone into a proxy gateway for the laptop / another phone on the
  * same Wi-Fi or hotspot: shows the exact `ip:port` values to type into the
  * other device's proxy settings, each with a one-tap copy button.
+ *
+ * 1.2.9-r3 (audit F-5): the shared listeners now require a username and password
+ * from any device that is not this phone, so the card shows the credential next to
+ * the addresses - with the same one-tap copy - and offers a rotation. Everything
+ * the user has to type into the laptop is in one place, which is the only way an
+ * authenticated proxy stays a feature people actually use instead of turning off.
  */
 @Composable
 fun SharePanel(
@@ -68,12 +78,22 @@ fun SharePanel(
     startExpanded: Boolean = false,
 ) {
     var expanded by remember { mutableStateOf(startExpanded) }
+    val scope = rememberCoroutineScope()
     val arrowRotation by animateFloatAsState(if (expanded) 180f else 0f, tween(300), label = "shareArrow")
     val shareActive by ShareBridge.active.collectAsState()
     // Show the ACTUAL bound ports (fixed standard ports; null while a listener is
     // busy), so the values on screen always match what the bridge listens on.
     val socksPort by ShareBridge.socksPort.collectAsState()
     val httpPort by ShareBridge.httpPort.collectAsState()
+    val proxyUser by ShareBridge.proxyUser.collectAsState()
+    val proxyPassword by ShareBridge.proxyPassword.collectAsState()
+    val panelContext = LocalContext.current
+
+    // Make sure the saved credential is loaded (or minted once) before the user can
+    // read it off this card. Keystore work, so never on the main thread.
+    LaunchedEffect(expanded) {
+        if (expanded) withContext(Dispatchers.IO) { ShareCredentials.ensure(panelContext) }
+    }
 
     // Re-resolve the LAN IP whenever the panel opens or connectivity flips.
     val lanIp = remember(expanded, shareActive, state.isConnected) { ShareBridge.lanAddress() }
@@ -188,7 +208,43 @@ fun SharePanel(
                                 label = stringResource(R.string.share_socks_label),
                                 value = "$lanIp:${socksPort ?: ShareBridge.SOCKS_SHARE_PORT}",
                             )
-                            Spacer(Modifier.height(8.dp))
+
+                            // The credential the other device has to send. Shown
+                            // here rather than buried in settings: it is part of
+                            // the same copy-and-type job as the two addresses.
+                            Spacer(Modifier.height(10.dp))
+                            HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            InfoText(stringResource(R.string.share_auth_note))
+                            Spacer(Modifier.height(4.dp))
+                            EndpointRow(
+                                label = stringResource(R.string.share_user_label),
+                                value = proxyUser,
+                            )
+                            EndpointRow(
+                                label = stringResource(R.string.share_pass_label),
+                                value = proxyPassword,
+                            )
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            ShareCredentials.rotate(panelContext)
+                                        }
+                                        Toast.makeText(
+                                            panelContext,
+                                            R.string.share_pass_rotated,
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
+                                },
+                            ) {
+                                Text(stringResource(R.string.share_pass_rotate))
+                            }
+
+                            Spacer(Modifier.height(4.dp))
                             Text(
                                 text = stringResource(R.string.share_warning),
                                 style = MaterialTheme.typography.bodySmall,

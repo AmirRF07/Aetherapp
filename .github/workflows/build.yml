@@ -267,6 +267,41 @@ jobs:
       # 1.2.7 removed the Tor backend, so there is no native Tor core to build
       # here any more (scripts/build-tor.sh is gone with it). The Aether core and
       # the Psiphon AAR are the only native inputs left.
+      # 1.2.9-r3: RUN THE TESTS. The 1.2.9 crash (AiRedaction "No group 1", which
+      # killed the app a minute after every connect) shipped past eight unit tests
+      # that would all have failed on it, because nothing ever executed them. The
+      # redaction rules and the new LAN-sharing access rules (LanGuardTest) are pure
+      # Kotlin by design precisely so this step can be cheap and mandatory.
+      #
+      # Retried on the same download-failure signatures as the build below, so an
+      # artifact repository having a bad minute cannot fail a release here either. A
+      # genuine test failure is never retried.
+      - name: Run unit tests
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8"
+        run: |
+          set -uo pipefail
+          LOG="${RUNNER_TEMP:-/tmp}/gradle-unit-tests.log"
+          for attempt in 1 2 3; do
+            set +e
+            gradle :app:testReleaseUnitTest --no-daemon --stacktrace 2>&1 | tee "$LOG"
+            status=${PIPESTATUS[0]}
+            set -e
+            if [ "$status" -eq 0 ]; then
+              exit 0
+            fi
+            if ! grep -qE 'Could not (resolve|GET|get resource|download)|Received status code (403|408|429|50[0-9])|Read timed out|Connection reset|Premature end of Content-Length' "$LOG"; then
+              echo "::error::Unit tests FAILED. Refusing to build a release from code that does not pass its own tests."
+              exit "$status"
+            fi
+            if [ "$attempt" -ge 3 ]; then
+              echo "::error::Dependency download kept failing after 3 attempts."
+              exit "$status"
+            fi
+            echo "::warning::Attempt ${attempt} failed while downloading dependencies - retrying in $((attempt * 30))s."
+            sleep $((attempt * 30))
+          done
+
       - name: Build release APKs
         env:
           # Kotlin/Compose compilation needs more heap than the 1 GB Gradle
@@ -346,6 +381,8 @@ jobs:
               exit 1
             fi
             echo "Signer SHA-256: ${SHA}"
+            # Published in the release body (see "Collect and rename APKs").
+            echo "SIGNER_SHA256=${SHA}" >> "$GITHUB_ENV"
             # In TEST signing mode the certificate is a throwaway one, so it is
             # meaningless to compare or record it. We only report it.
             if [ "${AETHER_SIGNING_MODE:-test}" != "release" ]; then
@@ -527,6 +564,35 @@ jobs:
           echo "Built APKs:"
           ls -la "$OUT"
 
+          # ---------------------------------------------------------------- F-1
+          # The release signing key is committed to this repository, so a
+          # signature alone does not prove where an APK came from, and rotating
+          # the key would break in-place updates for every existing user. The
+          # compensating control is out-of-band verifiability: publish the exact
+          # SHA-256 of every artifact and the fingerprint of the certificate that
+          # signed it. The app shows both (About card, via SignerIdentity), so a
+          # user can compare what they installed with what this pipeline built.
+          BODY="${RUNNER_TEMP:-/tmp}/release-body.md"
+          cp .github/release-notes.md "$BODY"
+          {
+            echo
+            echo "## Verify your download"
+            echo
+            echo "Open **About** in the app: it shows the APK SHA-256 and the signing certificate. They must match this list."
+            echo
+            echo '| File | SHA-256 |'
+            echo '| --- | --- |'
+            for f in "$OUT"/*.apk; do
+              [ -f "$f" ] || continue
+              echo "| \`$(basename "$f")\` | \`$(sha256sum "$f" | cut -d' ' -f1)\` |"
+            done
+            echo
+            if [ -n "${SIGNER_SHA256:-}" ]; then
+              echo "Signing certificate SHA-256: \`${SIGNER_SHA256}\`"
+            fi
+          } >> "$BODY"
+          echo "RELEASE_BODY=${BODY}" >> "$GITHUB_ENV"
+
       # Publish a Release on every successful build: each APK shows up as its
       # own downloadable asset. The release TITLE is just "Aether vX.Y.Z"
       # (no "(build N)" suffix); the tag still embeds the run number so every
@@ -539,4 +605,4 @@ jobs:
           name: ${{ startsWith(github.ref, 'refs/tags/') && format('Aether {0}', github.ref_name) || format('Aether v{0}', env.VERSION_NAME) }}
           files: artifacts/*.apk
           make_latest: true
-          body_path: .github/release-notes.md
+          body_path: ${{ env.RELEASE_BODY }}

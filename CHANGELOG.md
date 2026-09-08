@@ -1,4 +1,284 @@
+# Changelog
+
+## 1.2.9-r3 — security remediation + the connected mark
+
+Version unchanged (1.2.9 / versionCode 13) and signed with the same certificate,
+so this installs over an existing 1.2.9 without uninstalling.
+
+**Security (full report: `docs/SECURITY_AUDIT_1.2.9-r3.md`, score 79 -> 93)**
+
+- The on-disk diagnostics log is now encrypted with a hardware-backed AES-256-GCM
+  key; a plaintext log from an older build is read once, then shredded.
+- The engine's identity files (WireGuard private key + WARP device) are sealed at
+  rest and only exist in the clear while the tunnel is actually running.
+- LAN sharing is no longer an open proxy: remote clients must come from a local
+  address AND authenticate (SOCKS5 user/pass or HTTP Basic) with a generated
+  16-character password shown in the Share card. Loopback is unchanged.
+- TLS trust anchors are restricted to system CAs, so a user-installed root
+  certificate can no longer intercept the app's own requests.
+- The app verifies its own signing certificate against the published fingerprint
+  and shows it, with the APK's SHA-256, in About; CI publishes both per artifact.
+- New "Copy logs, addresses removed" button for logs that get pasted in public.
+- CI runs the unit tests before building a release (16 new tests).
+
+**UI**
+
+- Connected no longer shows a generic tick: it draws Aether's own A - the launcher
+  icon's letterform - lit, colour-cycling, with a diagonal light sweep, an internal
+  scan bar over a hairline grid, and a one-shot reveal wipe when the tunnel comes
+  up. Composed only while connected.
+
+# 1.2.9-r2 — crash on connect fixed + security audit (version unchanged)
+
+Version stays `1.2.9` / code 13; `PATCHLEVEL` unchanged. No dependency, permission,
+manifest or native change.
+
+## The crash (`IndexOutOfBoundsException: No group 1`)
+
+- **Root cause: `AiRedaction.redactLine` asked for a capture group the IPv6 pattern
+  does not have.** `IPV6` is written entirely with non-capturing `(?:…)` groups, so
+  `m.groupValues[1]` threw on the first log line containing any IPv6 literal. `IPV4`
+  on the next line happens to have one capture group, which is why the same idiom
+  worked there and hid the asymmetry. The engine prints
+  `[+] identity ready: … ipv6=2606:…` on every connect, so the redactor threw on
+  every session, in both plain and chained mode.
+- **Why the app closed a minute or two after connecting:** `MainActivity` runs the
+  on-connect analysis at the end of the *connected* branch, after the tunnel
+  self-test and after an exit-IP probe that waits up to 100 s. The digest is built
+  inside `scope.launch`, and `SupervisorJob` does not catch an unhandled throw — it
+  reached the thread's default handler and killed the process, leaving the
+  `last_crash.txt` the crash screen showed on the next launch.
+- **Fix:** both address rules mask `m.value` (group 0, which always exists), so the
+  code no longer depends on how a pattern is bracketed. Labelled rules read their
+  label with `groupValues.getOrElse(1)`.
+- **Containment, in three layers:** `digest` redacts through `safeRedactLine`, which
+  drops a line that throws (never falls back to its raw text); `analyze` builds the
+  digest inside `runCatching` and reports an ordinary failure; and `AiSession.scope`
+  now carries a `CoroutineExceptionHandler`, so no AI failure can ever take the
+  tunnel down again — it is logged, the `Running` state is resolved so the UI cannot
+  hang on a spinner, and the app keeps running.
+
+## Two leaks found while fixing it
+
+- **IPv4-mapped IPv6 was half-masked.** The general rules matched `::ffff:203` and
+  stopped, leaving `.0.113.9` in the digest — three octets of the public address the
+  rule exists to hide. Mapped forms (`::ffff:1.2.3.4`, `0:0:0:0:0:ffff:1.2.3.4`,
+  `::1.2.3.4`) are now matched whole and masked with the IPv4 policy, private and
+  loopback quads still kept intact.
+- **JSON-shaped identifiers were not recognised.** Half of this app's log is
+  Psiphon's JSON notices: `sessionId=` matched, `"sessionId":"5a4c…"` did not, so the
+  Psiphon session id travelled to the model verbatim. Both the credential rule and
+  the identifier rule now accept the quoted form.
+
+## Tests
+
+- `AiRedactionTest` grew from 8 to 12 cases: every IPv6 text form (full, compressed,
+  `::`, `::1`, link-local, bracketed, IPv4-mapped), JSON-shaped identifiers and
+  credentials, and a realistic mixed session log through `digest` asserting both
+  halves — nothing identifying survives, and the timestamps, loopback address, Rust
+  module paths and build stamp do.
+- Every assertion in that file would have failed before this fix, which means the
+  suite was never run against the shipped build. `gradle :app:testReleaseUnitTest`
+  should be a CI step; see `docs/SECURITY_AUDIT_1.2.9.md` §7.
+
+## Security audit
+
+- Full mobile-app security audit of the shipped tree: `docs/SECURITY_AUDIT_1.2.9.md`.
+  **Weighted score 79/100**, summarised in both READMEs, with the AI-privacy
+  statement (what the digest contains, and what is never sent) stated explicitly.
+  The committed release signing key (`.github/ci-keystore.jks.b64`) remains the one
+  critical finding and still needs a key rotation, not a code change.
+
+# 1.2.9 — AI path fixes (version unchanged)
+
+Version stays `1.2.9` / code 13; `PATCHLEVEL` unchanged.
+
+## Errors (a2, a4, a6)
+
+- **a2 was misdiagnosed by the app.** `Internal error encountered` is Google's own
+  HTTP 500. `GeminiClient` mapped every `>= 500` to `TRANSPORT` and told the user
+  "could not reach Google through the tunnel" — about a request that reached Google
+  and came back. That is why "try again" always worked. New `AiErrorKind.SERVER_ERROR`
+  says whose fault it is, and 5xx/429/socket failures are now retried
+  automatically (3 attempts, exponential, capped at 6s), so the user usually never
+  sees it.
+- **a4 (429) now honours Google's own `retryDelay`.** The field log has five 429s
+  in ten seconds because nothing read `"Please retry in 2.379075806s"`, and there
+  was no backoff at all. Both `Retry-After` and `error.details[].retryDelay` are
+  parsed and obeyed.
+- **a3/a6 root cause: thinking tokens, not a parse bug.** `maxOutputTokens` is a
+  budget for *everything* the model emits, and on a thinking model the reasoning
+  is spent first. The advisor asked for 1400 tokens with a 12,000-char log digest
+  attached; the model spent the budget thinking and returned an empty or truncated
+  body — logged as `200` + `advisor answer could not be parsed as JSON`. Fixed by
+  `thinkingConfig.thinkingBudget = 0`, `responseMimeType: application/json`,
+  budgets raised to 3072/5120, skipping `thought: true` parts, and detecting
+  `finishReason: MAX_TOKENS` as its own error kind with one larger retry.
+- **Every error string is translated.** `gate.name`, `"unreadable answer"` and
+  `"empty log"` reached the screen as raw English. Causes now travel on the state
+  (`AiMessage.errorKind/gate`, `AiProbe.Failed.gate`, `AiAdviceState.Failed.kind/reason`)
+  and one function, `aiFailureText`, owns the wording. Google's English boilerplate
+  is no longer appended when the translated headline already says it.
+
+## Models
+
+- New `AiModelPolicy`: a five-model allow-list, applied on **all four** paths —
+  fresh discovery, the cached list replayed at startup, the default pick, and the
+  id sent to `generateContent`. Filtering only on discovery is why a refresh (or a
+  cache from 1.2.8) put image/video/Pro models back.
+- Ordered newest→oldest by rank, not by string sort (lexically `3.1` precedes
+  `3.5` and `flash-lite-latest` sorts after every numbered release).
+- Picker rows are numbered `1. gemini-3.8-flash`, from the model's fixed position
+  in the allow-list rather than its index in the visible list.
+- Discovery succeeding with none of the five available now says so, instead of
+  leaving an empty picker to refresh forever.
+
+## UI and chat
+
+- **AI icon coverage is now complete**: `AiTopic.RECONNECT_SECS` existed with
+  nothing pointing at it, and three unrelated tuning fields shared one icon
+  labelled "TLS groups". Split into one block per field. Icons added to the About
+  row and the split-tunnel app picker. Zero topics are now unanchored.
+- **"Applies on the next connection" is a dialog.** It was 12sp dimmed text inside
+  the card, directly above Apply — so pressing Apply scrolled it out of view in
+  the chat and it sat below the fold in the advisor. The single most important
+  sentence in the feature was the least visible thing on screen.
+- **Retry icon on failed sends**, resending the original prompt (kept on the
+  bubble as `sourcePrompt`, not guessed by walking backwards — after an edit or a
+  delete the bubble above a failure is not necessarily its cause).
+- **Edit and delete messages**, single and in bulk: long-press to start a
+  selection, select-all, confirmed bulk delete. Editing truncates the conversation
+  after that point and re-asks.
+- **"Did not understand? Ask the assistant"** on every explanation sheet. Carries
+  the option name, its current value, the app's own description and the
+  explanation the user just failed to follow into the chat, phrased in their
+  language, and asks for a simpler answer.
+
+## Security (audit of the AI path)
+
+- **The advisor was sending the user's WARP identity to Google.** `AiRedaction`
+  masked IPv4 and nothing else, so the `identity ready:` line the engine writes on
+  every connect left with `device=<uuid>` and a full, globally routable, stable
+  IPv6 intact. Masking v4 to a /16 while shipping a /128 is not partial protection.
+  IPv6 is now masked to its /32, and `device=`/`sessionId`/bare UUIDs are removed.
+  Verified against all 312 lines of the supplied field log.
+- v1 (JAR) signing turned **off**: `minSdk` is 26, so it was unused on every
+  supported device and is the scheme Janus-class attacks target. Certificate
+  unchanged, so in-place updates still install.
+- The committed public release key (`.github/ci-keystore.jks.b64`) is **no longer
+  used automatically** — it now needs `-PaetherAllowPublicCiKey=true`. CI is
+  unaffected. The file stays until the key is rotated; deleting it would break
+  updates for every existing user. Still the project's highest-severity issue.
+- `android:usesCleartextTraffic="false"` stated explicitly in the manifest.
+- First unit tests in the project, covering the two pure-Kotlin pieces above.
+
+## Install warning (a1)
+
+Not fixed, and not fixable in the build. See `docs/PLAY_PROTECT.md`.
+WhiteAestherMobile does not avoid this dialog — its own README documents it as
+expected for a sideloaded APK, and its Play submission has the required in-app
+VPN disclosure still open as a blocking item. The `a1` prompt is Play Protect's
+unknown-APK scan, keyed on the app being absent from Google's corpus, not on how
+it is signed.
+
 ## 1.2.8-r8
+
+## 1.2.9 - Gemini AI features (version unchanged: 1.2.9 / versionCode 13)
+
+Added, all optional and all inert until the user enters their own key:
+
+- `data/GeminiStore.kt` - AI preferences in their own DataStore, so a settings
+  reset cannot destroy an API key. The key itself lives in `SecretStore` under the
+  new `GEMINI_KEY` alias, sealed with the existing hardware-backed AES-GCM key.
+- `ai/GeminiHttp.kt` - HTTPS to Google dialled through the tunnel's own local
+  SOCKS5 proxy, destination sent as `ATYP=0x03` (resolved at the exit), TLS
+  terminated on-device with hostname verification enforced, chunked transfer
+  decoding done on bytes rather than on text so a multi-byte Persian answer cannot
+  be corrupted at a chunk boundary. No new dependency: `org.json` is the platform's.
+- `ai/GeminiClient.kt` - model discovery (`GET /v1beta/models`, paginated and
+  bounded) and `generateContent`, with every failure translated into one of six
+  user-facing error kinds.
+- `ai/AiGate.kt` - the availability rule: the AI needs a key, a connected tunnel
+  and the chained `Aether -> Psiphon` mode, because the app excludes its own
+  package from the VPN and Google's AI endpoints refuse WARP exit addresses.
+- `ai/AiRedaction.kt` - the log digest that leaves the device: credentials removed,
+  the user's own Gemini key removed, public IPv4 masked to /16, private and
+  loopback addresses kept, hard character cap.
+- `ai/AiPatch.kt` - the ALLOW-LIST that bounds what a model may change: 29 tuning
+  keys, each value validated and snapped to the presets the UI itself offers. The
+  network backend, upstream proxy, routing lists, manual endpoint, proxy/split/
+  blocked-app policy, LAN sharing and every Zero Trust field are deliberately
+  absent, with the reason recorded per item in the file.
+- `ai/AiTopic.kt` - ~50 settings, each with a factual English description written
+  from the engine's real behaviour, so an explanation is grounded rather than
+  guessed. `ai/AiPrompts.kt` - the three system instructions and a tolerant parser
+  for the JSON contract. `ai/AiSession.kt` - process-lifetime state (settings,
+  models, conversation, advice), a bounded explanation cache, debounced key writes,
+  bounded chat history and a 90 s floor between automatic analyses.
+- `ui/ai/` - the AI icon and explanation sheet, the Gemini-style chat screen
+  (asymmetric turns, light Markdown, typing indicator, `imePadding` composer), and
+  the AI settings and advisor pages, all built from the existing settings row
+  primitives.
+
+Changed:
+
+- `ui/settings/SettingsUi.kt` - every row primitive, `GroupCaption` and
+  `SettingsBlock` gained an optional `aiTopic`. The icon is defined once, in
+  `BaseRow`, so it cannot drift between row types; with the hints switched off it
+  renders nothing and the row metrics are identical to 1.2.8's.
+- `ui/settings/SettingsScreen.kt` - three new routes (`AI`, `AI_CHAT`,
+  `AI_ADVISOR`), one `LocalAiHost` provider for the whole settings area, and a
+  topic on every option in every page. `AI_CHAT` is a navigation ROOT, like
+  `QUICK`, so backing out of the chat leaves settings.
+- `ui/HomeScreen.kt` - an assistant group at the top of the menu and an AI button
+  in the top-end corner, both OUTSIDE the `FitToHeight` subtree so the connect
+  button is not scaled down on small phones.
+- `MainActivity.kt` - the on-connect analysis runs at the end of the "connected"
+  phase, after the self-test has written its results, so the model reads the whole
+  connect rather than its first two seconds. `AetherApp.kt` attaches the store.
+- `res/values/strings.xml` + `res/values-fa/strings.xml` - 84 new strings each;
+  both files verified to hold identical key sets and identical format arguments.
+- `README.md`, `README.fa.md`, `native/aether/README.md`,
+  `native/aether/README.fa.md` and `.github/release-notes.md` document the feature
+  in English and Persian. The 1.2.8 sections were removed from the 1.2.9 release
+  notes as requested.
+
+Deliberately NOT changed: `versionName` stays 1.2.9, `versionCode` stays 13,
+`PATCHLEVEL` stays 1.2.9 (CI asserts it against the stamp inside the shipped
+`libaether.so`, and no native source was touched), and the engine is untouched.
+
+## 1.2.9
+
+### Home screen shortcut
+- `ui/HomeScreen.kt`: the top-end tune icon opens the new `SettingsRoute.QUICK`
+  instead of `SettingsRoute.HOME`. The drawer's Settings row is unchanged.
+- `ui/settings/SettingsScreen.kt`: `SettingsRoute.QUICK` added; it renders the
+  same `SettingsHomePage` with `quick = true`, which emits the Tunnel group and
+  the reset action only. `SettingsHost` treats QUICK as a stack ROOT, so back
+  leaves settings instead of descending into the full tree.
+- `res/values*/strings.xml`: `quick_settings_title` / `quick_settings_subtitle`
+  in English and Persian.
+
+### Engine core 1.8.0 -> 1.9.0 (rebased by hand)
+- Taken from upstream verbatim: `cli.rs`, `masque.rs`, `masque_h2.rs`, the core's
+  own docs. New: capsule batching, a dedicated H2 send task, 64 KB DATA frames,
+  tier-based H2 flow-control windows.
+- Hand-merged, app patches preserved: `lib.rs` (warp-in-warp manual hops,
+  `masque_tunnel_mtu()`/`H2_TUNNEL_MTU`, `select_wg_peers(.., avoid)`,
+  `select_scan_mode_str(tip)`, upstream's 23 new unit tests) and `sysprofile.rs`
+  (upstream's `buffer_override()` + H2 windows adopted; the r4/r6 buffer figures
+  kept).
+- Left at the app's version on purpose: `netstack.rs`, `wireguard.rs`,
+  `wg_prober.rs`, `prober.rs`, `quic.rs`, `upstream.rs` (upstream 1.9.0 does not
+  change them beyond what the app patches already rewrote), and the smoltcp
+  0.12 + `socket-tcp-cubic` pin in `Cargo.toml`.
+- `CORE_VERSION` -> 1.9.0, crate version -> 1.9.0, `rust-version` -> 1.91 (CI
+  installs the latest stable, so no toolchain change is needed).
+- `.upstream-baseline/` now caches pristine 1.9.0 copies of all ten patched
+  files, so the next automatic upgrade has a real merge base for every one.
+
+### Identity
+- versionName 1.2.9, versionCode 13, `PATCHLEVEL` 1.2.9.
 
 **Root cause of the upload stall: nothing on the app->network path was bounded in
 time, and the queue that held the upload was never measured.**

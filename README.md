@@ -6,6 +6,49 @@
 
 ---
 
+## What's new in v1.2.9
+
+- **Two real privacy leaks were found and closed while fixing that crash.** IPv4-mapped IPv6 addresses (`::ffff:203.0.113.9`) were only half-masked, leaving three octets of a public address in the digest, and Psiphon's JSON identifiers (`"sessionId":"…"`) were not recognised as identifiers at all. Both are masked now, and the redactor's test suite grew from 8 cases to 12.
+- **Engine (core) upgraded to v1.9.0** (previous: v1.8.0), with this app's own engine patches rebased onto the new sources rather than overwritten:
+  - **You can name the two hops of WARP-in-WARP (gool) yourself.** New engine options `--wiw-outer` / `--wiw-inner` / `--wiw-peers` (and `--wiw-scan` to go back to hunting for both). Naming one hop lets the scan find the other, the port has to be written out, and the two hops must be different edges. A malformed address is now reported before an account is provisioned instead of silently falling back to a scan.
+  - **MASQUE over HTTP/2 is no longer capped by its own carrier.** The HTTP/2 flow-control windows were the RFC minimum of 64 KB, which limits any download over that transport to roughly 500 KB/s on a 130 ms path however fast the line really is. The windows now follow the device tier, DATA frames may be 64 KB, outbound packets already queued behind one another are sent in one frame instead of one frame each, sending moved to a task of its own (so a busy upload can no longer stall the download beside it), and the HTTP/2 tunnel gets a full 1500-byte inner MTU instead of the 1280 that only QUIC needs.
+  - **Engine buffers can be tuned per device** without a rebuild (`AETHER_NETSTACK_TCP_RX`, `AETHER_NETSTACK_TCP_TX`, `AETHER_MASQUE_MTU`), and the engine's `help` output now documents every option together with the environment variable that sets it.
+- **Everything 1.2.8 fixed stays exactly as it was.** This was a condition of the upgrade, not an afterthought: core 1.9.0 independently re-sized the same data-plane buffers 1.2.8 spent five rounds getting right, and those upstream numbers were **not** taken. The netstack keeps its CUBIC congestion control, its bounded uplink send buffer and its bandwidth-delay-product receive window, the datagram sockets keep the split receive/send sizing from r6, and the TCP stack stays pinned to the version the app's netstack is written against. Download speed and connect behaviour on every protocol are the 1.2.8 ones.
+- **The next automatic core upgrade is safer than this one was.** Pristine upstream copies of *all ten* app-patched engine files are now cached as the merge baseline (1.2.8 cached two), so CI's three-way rebase can never mistake an app patch for an upstream deletion.
+- **Version:** app <span dir="ltr">1.2.9</span>, version code <span dir="ltr">13</span>, engine core <span dir="ltr">1.9.0</span>. Installs straight over 1.2.8 from the same repository - the signing configuration is unchanged.
+
+### 🔒 Security audit 1.2.9 — **79 / 100**
+
+A full mobile-app security audit was run over the whole shipped tree (Kotlin app, Gradle + signing config, manifest, the Rust engine, the embedded Psiphon library and CI). Full report: [`docs/SECURITY_AUDIT_1.2.9.md`](docs/SECURITY_AUDIT_1.2.9.md).
+
+| # | Area | Weight | Score |
+| --- | --- | --- | --- |
+| 1 | Secrets & key management | 20 | 55 |
+| 2 | Cryptography & protocols (TLS, MitM) | 15 | 88 |
+| 3 | Data-leak risk (DNS, IPv6, bypass) | 20 | 90 |
+| 4 | Local storage | 15 | 72 |
+| 5 | Permissions & OS configuration | 10 | 96 |
+| 6 | Logging | 10 | 85 |
+| 7 | Code quality & network config | 10 | 80 |
+| | **Weighted total** | **100** | **79** |
+
+**What is good:** no API key, token or private key is hardcoded anywhere in the app; the user's Gemini key and the Cloudflare Access secrets are sealed with AES-256-GCM under a non-exportable Android Keystore key; there is **no custom `TrustManager` and no permissive hostname verifier** anywhere, and every hand-rolled TLS socket verifies the certificate name explicitly, so no MitM path was found; no weak or obsolete crypto (no MD5/SHA-1/DES/RC4/ECB); DNS is resolved by the exit, not by the device, and IPv6 is routed into the tunnel (unconditionally in chained mode) so there is no DNS or IPv6 leak path; cleartext HTTP is denied app-wide; backups are disabled twice over; only four permissions are requested, with no `QUERY_ALL_PACKAGES`, no `REQUEST_INSTALL_PACKAGES` and no exported content provider; `android:debuggable` is never set and `allowBackup` is `false`; and the app contains **no analytics, no crash-reporting SDK and no tracking library** of any kind.
+
+**What costs points:** the release signing key is still committed to the repository with its password in the build file (**critical**, and the one issue that accounts for almost the whole gap - it needs a key rotation, not a code change; the 1.2.9 build already makes that key opt-in and warns loudly when it is used); the diagnostics log and the engine's identity file (which holds the WireGuard private key) are plaintext on app-private storage; LAN sharing, when the user switches it on, is an unauthenticated proxy for everyone on the Wi-Fi; there is no certificate pinning; and R8/minification is off. With the signing key rotated out and R8 enabled, the same tree scores ≈ 88.
+
+### 🤖 Your logs and your data are not sent to the AI
+
+Stated explicitly, because it is the question that matters: **the app does not send your sensitive information to any AI.**
+
+- The AI features only exist if **you** paste **your own** Gemini API key and switch them on. With the feature off - the default - the app makes **no** request to any AI service whatsoever.
+- What is sent is a **redacted digest** of the diagnostics log (at most 220 lines / 12,000 characters), over TLS, through the tunnel's own local proxy - never your raw log.
+- Removed before anything leaves the phone: your API key and any key/token/secret/password/authorization value (in plain **and** JSON form), the WARP `device=` enrolment handle, installation and session identifiers (including Psiphon's `"sessionId"`) and every UUID, public IPv4 addresses (masked to `188.114.x.x`), public IPv6 addresses (masked to `2606:4700:x:x` - your assigned WARP IPv6 is globally routable and stable, so a full address *is* you), and IPv4-mapped IPv6 addresses.
+- Kept on purpose, because they are plumbing and not identity: `127.0.0.1:1819`, private/loopback addresses, timestamps, protocol and error text, the build stamp.
+- **Never sent at all:** your browsing history, DNS queries, visited domains, traffic contents or packet payloads, contacts, files, device identifiers or location. There is no telemetry in this app.
+- If the redactor ever fails on a line, that line is **dropped** - it is never sent unredacted. That is enforced in code and covered by unit tests.
+
+---
+
 ## What's new in v1.2.8
 
 Users reported several connection problems, especially when using chained mode (`Aether → Psiphon`). These problems have now been fixed:
@@ -369,3 +412,90 @@ You can pin versions via env vars: `HEV_REF`, `AETHER_REPO`, `AETHER_REF`.
 - [heiher/hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) — the tunnel core.
 
 Released under **AGPL-3.0**. See [LICENSE](LICENSE).
+
+
+## Gemini AI (1.2.9)
+
+Bring your own free Gemini key and the app gains four things. All of them are
+optional, all of them are off until you enter a key, and none of them changes how
+the tunnel works.
+
+**1. Your own API key, your own models.** Paste a free key from
+[Google AI Studio](https://aistudio.google.com/apikey) into *Settings -> Assistant*
+and press **Test the API connection**. The app asks your key which models it may
+use and shows exactly that list - a free key, a billing-enabled key and a key from
+a region where a model has not launched all see different models, so nothing is
+hard-coded. A model is picked for you; you can change it.
+
+The key is sealed with a hardware-backed AES-GCM key from the Android Keystore
+(`SecretStore`), never written to the plain settings file, never written to the
+diagnostics log, and sent to Google in a request **header** rather than a query
+string. Resetting the app settings does not delete it.
+
+**2. Settings advice from your own log.** After each connect - or on demand from
+*Assistant -> Settings advisor* - Gemini reads a redacted excerpt of this session's
+log, reports what your operator's inspection appears to be doing to the
+connection, and proposes the settings that fit it. This **optimises the app's own
+options**; it is not advice about anyone else's infrastructure.
+
+What is redacted before anything leaves the device: credentials of any shape
+(including your own Gemini key), and every public IPv4 masked to its /16. Private
+and loopback addresses are kept, because `127.0.0.1:1819` is the most diagnostic
+string in the whole log. Nothing is applied until you press **Apply**, unless you
+switch automatic apply on yourself.
+
+**3. An AI icon next to every option.** Tap the small mark beside any setting and
+you get: what it is, what it is for, and how to use it - in your language. Each
+answer is grounded in a factual description of that setting written from the
+engine's real behaviour, so the model explains something true instead of guessing
+what "Noize" or "Scan mode" might mean in a VPN app. The factual description shows
+instantly, with or without a key; Gemini's answer arrives underneath it. Answers
+are cached, so reopening a sheet costs no quota. Switch the icons off in
+*Assistant -> Behaviour*.
+
+**4. A chat inside the app.** *Assistant -> Chat with Gemini*, or the AI button in
+the top corner of the home screen. Ask anything. Ask it to change something and it
+proposes a patch you approve with one tap.
+
+### What the AI may and may not change
+
+Tuning only: protocol, scan mode, IP family, obfuscation, MTU, keepalive, TLS
+fragmentation and its ranges, ECH, MASQUE-over-HTTP/2, quick reconnect, in-tunnel
+DNS, domain sniffing, TLS groups, validate/reconnect timings, reconnect limits,
+kill switch, IPv6 leak protection, identity reprovisioning, exit country and the
+core log level.
+
+It can **never** change: the network backend, the upstream proxy, the block and
+direct routing lists, a pinned manual endpoint or scan range, proxy mode, split
+tunneling, blocked apps, LAN sharing, or any Zero Trust credential. Those decide
+*which traffic is protected and where it goes*, and the allow-list that enforces
+this is code (`ai/AiPatch.kt`), not prompt wording - a change the model cannot
+express is a change it cannot make.
+
+Applied changes are handed to the engine when it starts, so they take effect on
+your **next connect**. The app says so every time.
+
+### Why the AI only works while connected, in `Aether -> Psiphon`
+
+Not a policy. Two facts:
+
+- `AetherVpnService` calls `addDisallowedApplication` on this app's own package, so
+  Aether's sockets deliberately bypass the tunnel it builds. A normal HTTP client
+  would leave on the operator's network, in the clear, and fail - while announcing
+  to that operator that this device just tried to reach a blocked AI endpoint. So
+  every AI request is dialled through the tunnel's own local SOCKS5 proxy
+  (`ai/GeminiHttp.kt`), with the destination sent as a **domain** so the exit
+  resolves it, and TLS terminated on the device with hostname verification
+  enforced. With the tunnel down there is no path at all.
+- Google's AI endpoints refuse or challenge Cloudflare WARP exit addresses - the
+  exact symptom 1.2.8 shipped release notes about. The chained mode exits through
+  a Psiphon address, which they accept.
+
+When either condition is missing, every AI surface says which one and offers the
+button that fixes it.
+
+### Dependencies added: none
+
+JSON is `org.json` from the Android platform; HTTP, TLS and SOCKS5 are hand-rolled
+over `java.net`, the same way `core/NetProbe.kt` already probes the tunnel. The
+APK gains no third-party library.

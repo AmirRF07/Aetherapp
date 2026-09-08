@@ -67,6 +67,10 @@
     <string name="diag_problem">A problem was detected — see the failing check</string>
     <string name="diag_idle">Run the test to verify connectivity</string>
     <string name="diag_empty_logs">No logs yet. Connect or run a test.</string>
+    <!-- 1.2.9-r3 (audit §6): a log that is safe to paste in public. -->
+    <string name="diag_copy_redacted">Copy logs, addresses removed (safe to share)</string>
+    <string name="diag_copied_redacted">Redacted logs copied — IPs and identifiers removed</string>
+    <string name="diag_log_sealed">The log kept on this device is encrypted with a device key.</string>
 
     <!-- About panel -->
     <string name="about_title">About</string>
@@ -95,7 +99,13 @@
     <string name="share_starting">Starting sharing… if this takes more than a few seconds, toggle the switch off and on again.</string>
     <string name="share_need_wifi">Join a Wi‑Fi network or turn on your hotspot to share.</string>
     <string name="share_howto">On the other device (same network), open its proxy settings and enter one of these addresses:</string>
-    <string name="share_warning">While sharing is on, anyone on this network can use the proxy. Use only on trusted networks.</string>
+    <string name="share_warning">Only devices on this local network that enter the username and password below can use the proxy. Their traffic still leaves through your exit IP, so share it only with devices you trust.</string>
+    <!-- 1.2.9-r3 (audit F-5): the shared listeners authenticate remote clients. -->
+    <string name="share_auth_note">The other device must sign in to the proxy with these:</string>
+    <string name="share_user_label">Proxy username</string>
+    <string name="share_pass_label">Proxy password</string>
+    <string name="share_pass_rotate">Generate a new password</string>
+    <string name="share_pass_rotated">New proxy password generated</string>
 
     <string name="traffic_download">Download</string>
     <string name="traffic_upload">Upload</string>
@@ -171,6 +181,15 @@
     <!-- About: engine/core version (parity with the Windows edition) -->
     <string name="about_core_version">Engine (core) version %1$s</string>
     <string name="about_patch_level">Build: %1$s</string>
+    <!-- 1.2.9-r3 (audit F-1 mitigation): is this the build we published? -->
+    <string name="about_signer">Signing certificate: %1$s</string>
+    <string name="about_signer_ok">Matches the official Aether certificate.</string>
+    <string name="about_signer_bad">This copy was signed by someone else, not by the Aether project. A VPN app sees all of your traffic — reinstall from the official release page.</string>
+    <string name="about_signer_unpinned">No official fingerprint is compiled into this build, so it cannot be checked here.</string>
+    <string name="about_signer_unknown">The system did not report a signing certificate for this app.</string>
+    <string name="about_apk_hash">APK SHA-256: %1$s</string>
+    <string name="about_apk_hash_loading">calculating…</string>
+    <string name="about_verify_hint">Compare this hash with the one published for your download on the official releases page before trusting an update.</string>
 
     <!-- Engine v1.5.0 features -->
     <string name="section_zerotrust">Zero Trust (organization)</string>
@@ -278,6 +297,8 @@
 
     <!-- 1.2.7: the settings screen, the in-app language switch and the
          cached-endpoint budget -->
+    <string name="quick_settings_title">Tunnel settings</string>
+    <string name="quick_settings_subtitle">Connection, transport, DNS and upstream proxy</string>
     <string name="settings_title">Settings</string>
     <string name="settings_subtitle">Connection, apps, security and diagnostics</string>
     <string name="settings_locked_hint">Disconnect to change the tunnel settings. They are handed to the engine when it starts.</string>
@@ -323,4 +344,142 @@
     <string name="reset_confirm_title">Reset all settings?</string>
     <string name="reset_confirm_body">Every setting goes back to its default, including endpoint ranges, routing rules and enrolment details.</string>
     <string name="reset_confirm_ok">Reset</string>
+    <!-- =================================================================
+         1.2.9 - Gemini AI features.
+         Every key below MUST also exist in values-fa/strings.xml. A missing
+         Persian entry does not fail the build, it silently ships an English
+         sentence into a right-to-left screen, which is how a localised app
+         rots one string at a time.
+         ================================================================= -->
+    <string name="ai_title">Aether AI</string>
+    <string name="ai_subtitle">Gemini inside the app: explanations, tuning and chat</string>
+    <string name="ai_badge">AI</string>
+    <string name="cat_ai">Assistant</string>
+    <string name="cat_ai_desc">Explains any setting, reads the log, proposes tuning</string>
+
+    <!-- key -->
+    <string name="ai_section_key">Gemini API key</string>
+    <string name="ai_key_label">API key</string>
+    <string name="ai_key_hint">AIza…</string>
+    <string name="ai_key_help">Get a free key from Google AI Studio (aistudio.google.com/apikey). It is stored on this phone sealed with a hardware-backed key, it is sent only to Google, and only ever through the tunnel. Resetting the app settings does not delete it.</string>
+    <string name="ai_key_show">Show</string>
+    <string name="ai_key_hide">Hide</string>
+    <string name="ai_key_paste">Paste</string>
+    <string name="ai_key_forget">Forget the key and the model list</string>
+    <string name="ai_key_forgotten">API key removed</string>
+    <string name="ai_test">Test the API connection</string>
+    <string name="ai_test_hint">Checks the key and lists the models it may use</string>
+    <string name="ai_test_running">Testing…</string>
+    <string name="ai_test_ok">Working — %1$d model(s) available through %2$s</string>
+    <string name="ai_test_failed">Not working: %1$s</string>
+
+    <!-- models -->
+    <string name="ai_section_models">Models your key can use</string>
+    <string name="ai_model_label">Model</string>
+    <string name="ai_models_count">%1$d available</string>
+    <string name="ai_models_empty">No models discovered yet. Connect, then run the API test: the list is read from your own key, so it shows exactly the models that key is allowed to use.</string>
+    <string name="ai_models_refresh">Refresh the model list</string>
+
+    <!-- behaviour -->
+    <string name="ai_section_behaviour">Behaviour</string>
+    <string name="ai_auto_optimize">Analyse the log on every connect</string>
+    <string name="ai_auto_optimize_desc">After each successful connect, Gemini reads a redacted excerpt of this session\'s log, reports what your operator seems to be doing to the connection, and proposes the settings that fit it.</string>
+    <string name="ai_auto_apply">Apply proposals automatically</string>
+    <string name="ai_auto_apply_desc">Write proposals straight into the settings instead of waiting for you to review them. Off by default, because a setting that changes on its own is hard to tell apart from a bug.</string>
+    <string name="ai_hints">Show AI icons next to options</string>
+    <string name="ai_hints_desc">Tap the icon beside any setting and Gemini explains what it is, what it is for and how to use it.</string>
+
+    <!-- chat -->
+    <string name="ai_chat_open">Chat with Gemini</string>
+    <string name="ai_chat_subtitle">Ask anything, or say what you want changed</string>
+    <string name="ai_chat_model">Model: %1$s</string>
+    <string name="ai_chat_empty_title">Hi, I am Aether AI</string>
+    <string name="ai_chat_empty_body">I can explain any setting in this app, read this session\'s log and propose tuning, or just answer a question.</string>
+    <string name="ai_chat_suggest_1">Why is my connection slow right now?</string>
+    <string name="ai_chat_suggest_2">Which protocol should I use on mobile data?</string>
+    <string name="ai_chat_suggest_3">Explain MTU and pick the best one for me</string>
+    <string name="ai_chat_suggest_4">Make the tunnel harder to detect</string>
+    <string name="ai_chat_input_hint">Ask Aether AI…</string>
+    <string name="ai_chat_send">Send</string>
+    <string name="ai_chat_stop">Stop</string>
+    <string name="ai_chat_clear">Clear the conversation</string>
+    <string name="ai_chat_thinking">Thinking…</string>
+    <string name="ai_chat_copy">Copy answer</string>
+
+    <!-- explain sheet -->
+    <string name="ai_explain_title">What is this?</string>
+    <string name="ai_explain_loading">Asking Gemini…</string>
+    <string name="ai_explain_failed">%1$s</string>
+    <string name="ai_explain_retry">Try again</string>
+
+    <!-- advisor -->
+    <string name="ai_advisor_title">Settings advisor</string>
+    <string name="ai_advisor_subtitle">What your network is doing, and the settings that fit it</string>
+    <string name="ai_advisor_run">Analyse this session</string>
+    <string name="ai_advisor_running">Reading the log and thinking…</string>
+    <string name="ai_advisor_idle">Gemini reads a redacted excerpt of this session\'s log — credentials removed, public addresses masked — and proposes tuning. Nothing changes until you press Apply.</string>
+    <string name="ai_advisor_failed">Could not analyse: %1$s</string>
+    <string name="ai_advisor_dpi">What your network appears to be doing</string>
+    <string name="ai_advisor_confidence">Confidence: %1$s</string>
+    <string name="ai_advisor_no_changes">Nothing worth changing — this session looks healthy.</string>
+    <string name="ai_confidence_high">high</string>
+    <string name="ai_confidence_medium">medium</string>
+    <string name="ai_confidence_low">low</string>
+
+    <!-- proposals -->
+    <string name="ai_changes_title">Proposed settings (%1$d)</string>
+    <string name="ai_apply">Apply</string>
+    <string name="ai_applied">Applied</string>
+    <string name="ai_apply_note">Tunnel settings are handed to the engine when it starts, so these take effect on your next connect.</string>
+    <string name="ai_dismiss">Dismiss</string>
+
+    <!-- gate -->
+    <string name="ai_gate_no_key">Add your Gemini API key to use the AI features.</string>
+    <string name="ai_gate_no_model">No model selected yet. Run the API test and one will be picked for you.</string>
+    <string name="ai_gate_disconnected">The AI needs the tunnel. Connect first: Google\'s AI endpoints are not reachable directly, and Aether\'s own traffic deliberately bypasses the tunnel it builds.</string>
+    <string name="ai_gate_wrong_mode">Switch the network backend to Aether → Psiphon. Google\'s AI endpoints refuse plain Aether/WARP exit addresses, which is why the AI only runs in the chained mode.</string>
+    <string name="ai_gate_fix_key">Open AI settings</string>
+    <string name="ai_gate_fix_mode">Open connection settings</string>
+
+    <!-- errors -->
+    <string name="ai_error_bad_key">Your API key was rejected. Check it and try again.</string>
+    <string name="ai_error_rate_limit">Rate limit or quota reached. Wait a moment and retry.</string>
+    <string name="ai_error_no_model">That model is not available to your key. Refresh the model list.</string>
+    <string name="ai_error_transport">Could not reach Google through the tunnel.</string>
+    <string name="ai_error_protocol">Google\'s answer could not be read.</string>
+    <string name="ai_error_blocked">Gemini declined to answer that.</string>
+
+    <!-- small print -->
+    <string name="ai_privacy_title">What leaves your device</string>
+    <string name="ai_privacy_body">Only what a request needs: your prompt, the name of the setting you asked about, and your current tuning values. The log analysis adds a redacted excerpt of the log, with credentials stripped and public addresses masked to their /16. Everything travels to Google through the tunnel, never directly.</string>
+    <string name="ai_scope_title">What the AI may change</string>
+    <string name="ai_scope_body">Tuning only: protocol, obfuscation, MTU, fragmentation, DNS, reconnect behaviour and the like. It can never change the network backend, the upstream proxy, routing rules, which apps are tunnelled, or any credential — those decide which traffic is protected, so they stay in your hands.</string>
+
+    <!-- ===== 1.2.9 AI additions ===================================== -->
+    <string name="ai_error_server">Google\'s AI service failed to answer. This is on their side, not your connection.</string>
+    <string name="ai_error_truncated">The answer was cut off before it finished. Try again.</string>
+    <string name="ai_advisor_unreadable">The model did not answer in the format the app needs, twice in a row. Try again, or pick another model.</string>
+    <string name="ai_advisor_empty_log">There is nothing in the connection log to analyse yet. Connect first, then run the analysis.</string>
+    <string name="ai_models_none_allowed">Your key can reach Google, but none of the models this app supports are available to it. Supported models:\n%1$s</string>
+    <string name="ai_models_filtered">Only the supported Flash models are shown</string>
+    <string name="ai_models_help">The list is limited to fast Flash models that answer reliably on a free key, newest first. Image, video, audio and Pro models are hidden because they cannot answer here or exhaust a free quota immediately.</string>
+    <string name="ai_applied_dialog_title">Saved for the next connection</string>
+    <string name="ai_applied_dialog_body">The new settings are stored, but the tunnel is already running with the old ones. Tunnel settings are handed to the engine when it starts, so disconnect and connect again for them to take effect.</string>
+    <string name="ai_applied_dialog_ok">Got it</string>
+    <string name="ai_explain_ask_chat">Did not understand? Ask the assistant</string>
+    <string name="ai_chat_retry">Try again</string>
+    <string name="ai_chat_edit">Edit</string>
+    <string name="ai_chat_delete">Delete</string>
+    <string name="ai_chat_edited">edited</string>
+    <string name="ai_chat_cancel">Cancel</string>
+    <string name="ai_chat_edit_title">Edit message</string>
+    <string name="ai_chat_edit_send">Send again</string>
+    <string name="ai_chat_edit_note">Everything after this message will be removed and the assistant will answer the edited question.</string>
+    <string name="ai_chat_selected">%1$d selected</string>
+    <string name="ai_chat_select_all">Select all</string>
+    <string name="ai_chat_selection_cancel">Cancel selection</string>
+    <string name="ai_chat_delete_selected">Delete selected</string>
+    <string name="ai_chat_delete_title">Delete %1$d message(s)?</string>
+    <string name="ai_chat_delete_body">This cannot be undone. Deleted messages are not sent to the assistant as context any more.</string>
+    <string name="ai_chat_delete_confirm">Delete</string>
 </resources>

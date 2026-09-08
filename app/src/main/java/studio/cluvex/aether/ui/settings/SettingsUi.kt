@@ -55,6 +55,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import studio.cluvex.aether.ai.AiTopic
+import studio.cluvex.aether.ui.ai.AiTopicIcon
 import studio.cluvex.aether.ui.theme.Navy700
 import studio.cluvex.aether.ui.theme.Navy750
 import studio.cluvex.aether.ui.theme.Navy800
@@ -197,16 +199,41 @@ fun LazyListScope.settingsSection(
     Column(modifier = Modifier.fillMaxWidth(), content = content)
 }
 
-/** The small coloured caption above a group. */
+/**
+ * The small coloured caption above a group.
+ *
+ * 1.2.9: it can carry the AI mark. Several groups are a single segmented selector
+ * with no row in them - the endpoint mode, the protocol, the IP family - so the
+ * caption is the only place an icon for that option can honestly sit.
+ */
 @Composable
-fun GroupCaption(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelLarge,
-        fontWeight = FontWeight.SemiBold,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.padding(start = 6.dp, top = 12.dp, bottom = 8.dp),
-    )
+fun GroupCaption(text: String, aiTopic: AiTopic? = null) {
+    if (aiTopic == null) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(start = 6.dp, top = 12.dp, bottom = 8.dp),
+        )
+        return
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 6.dp, end = 2.dp, top = 12.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        Spacer(Modifier.width(10.dp))
+        AiTopicIcon(aiTopic)
+    }
 }
 
 /** The explanatory footnote under a group. */
@@ -280,6 +307,19 @@ private fun BaseRow(
     onClick: (() -> Unit)?,
     titleColor: Color? = null,
     iconTint: Color? = null,
+    /**
+     * 1.2.9: which option this row is about, for the AI explanation icon.
+     *
+     * It lives HERE rather than in each row composable so that the icon's size,
+     * tint and position are defined exactly once, in the same place the row's
+     * heights and insets are. A per-row implementation is how the mark would end
+     * up 2dp higher on the switch rows than on the chevron rows.
+     *
+     * Null on a row means the row has nothing to explain, and
+     * [AiTopicIcon] draws nothing at all when the user has the hints switched off,
+     * so the row metrics with hints off are byte-identical to 1.2.8's.
+     */
+    aiTopic: AiTopic? = null,
     trailing: @Composable () -> Unit = {},
 ) {
     val alpha = if (enabled) 1f else 0.45f
@@ -317,6 +357,10 @@ private fun BaseRow(
             }
         }
         Spacer(Modifier.width(10.dp))
+        if (aiTopic != null) {
+            AiTopicIcon(aiTopic)
+            Spacer(Modifier.width(8.dp))
+        }
         trailing()
     }
 }
@@ -330,12 +374,14 @@ fun SettingsNavRow(
     icon: ImageVector? = null,
     value: String? = null,
     enabled: Boolean = true,
+    aiTopic: AiTopic? = null,
 ) = BaseRow(
     title = title,
     summary = summary,
     icon = icon,
     enabled = enabled,
     onClick = onClick,
+    aiTopic = aiTopic,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         if (!value.isNullOrBlank()) {
@@ -368,12 +414,14 @@ fun SettingsSwitchRow(
     summary: String? = null,
     icon: ImageVector? = null,
     enabled: Boolean = true,
+    aiTopic: AiTopic? = null,
 ) = BaseRow(
     title = title,
     summary = summary,
     icon = icon,
     enabled = enabled,
     onClick = { onCheckedChange(!checked) },
+    aiTopic = aiTopic,
 ) {
     Switch(
         checked = checked,
@@ -410,6 +458,7 @@ fun <T> SettingsChoiceRow(
     icon: ImageVector? = null,
     enabled: Boolean = true,
     sheetTitle: String = title,
+    aiTopic: AiTopic? = null,
 ) {
     var open by remember { mutableStateOf(false) }
     BaseRow(
@@ -418,6 +467,7 @@ fun <T> SettingsChoiceRow(
         icon = icon,
         enabled = enabled,
         onClick = { open = true },
+        aiTopic = aiTopic,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -508,6 +558,7 @@ fun SettingsValueRow(
     title: String,
     value: String,
     icon: ImageVector? = null,
+    aiTopic: AiTopic? = null,
     trailing: @Composable () -> Unit = {},
 ) = BaseRow(
     title = title,
@@ -515,6 +566,7 @@ fun SettingsValueRow(
     icon = icon,
     enabled = true,
     onClick = null,
+    aiTopic = aiTopic,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
@@ -538,6 +590,7 @@ fun SettingsActionRow(
     icon: ImageVector? = null,
     enabled: Boolean = true,
     destructive: Boolean = false,
+    aiTopic: AiTopic? = null,
 ) = BaseRow(
     title = title,
     summary = summary,
@@ -546,6 +599,7 @@ fun SettingsActionRow(
     onClick = onClick,
     titleColor = if (destructive) MaterialTheme.colorScheme.error else null,
     iconTint = if (destructive) MaterialTheme.colorScheme.error else null,
+    aiTopic = aiTopic,
 )
 
 /**
@@ -558,16 +612,38 @@ fun SettingsActionRow(
 fun SettingsBlock(
     title: String? = null,
     helper: String? = null,
+    /**
+     * 1.2.9: a block hosts a full-width control instead of a row, so its AI icon
+     * sits on the block's own header line rather than in a row's trailing slot -
+     * and the header line is drawn for the icon alone when the block has no title,
+     * because several blocks are just a labelled text field.
+     */
+    aiTopic: AiTopic? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 14.dp)) {
-        if (title != null) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.labelLarge,
-                color = OnDarkMuted,
-                modifier = Modifier.padding(bottom = 10.dp),
-            )
+        if (title != null || aiTopic != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // Exactly one weighted child, so a long label uses the whole
+                // line and an untitled block still pushes the mark to the end.
+                if (title != null) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = OnDarkMuted,
+                        modifier = Modifier.weight(1f),
+                    )
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
+                Spacer(Modifier.width(10.dp))
+                AiTopicIcon(aiTopic)
+            }
         }
         content()
         if (!helper.isNullOrBlank()) {
@@ -596,12 +672,14 @@ fun SettingsRadioRow(
     summary: String? = null,
     icon: ImageVector? = null,
     enabled: Boolean = true,
+    aiTopic: AiTopic? = null,
 ) = BaseRow(
     title = title,
     summary = summary,
     icon = icon,
     enabled = enabled,
     onClick = onSelect,
+    aiTopic = aiTopic,
 ) {
     RadioButton(
         selected = selected,

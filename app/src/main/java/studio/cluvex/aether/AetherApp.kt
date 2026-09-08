@@ -6,9 +6,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
 import android.util.Log
+import studio.cluvex.aether.ai.AiSession
 import studio.cluvex.aether.core.DiagnosticsLog
+import studio.cluvex.aether.core.IdentityVault
+import studio.cluvex.aether.core.SignerIdentity
 import studio.cluvex.aether.data.LanguagePrefs
+import studio.cluvex.aether.data.ShareCredentials
 import java.io.File
+import kotlin.concurrent.thread
 
 class AetherApp : Application() {
 
@@ -31,6 +36,36 @@ class AetherApp : Application() {
         // startup (and any crash) is written to disk and survives process death.
         DiagnosticsLog.init(File(filesDir, "diagnostics.log"))
         installCrashHandler()
+
+        // 1.2.9-r3 SECURITY: is this build the build the project published?
+        // One PackageManager call; writes a single line into the log, and an
+        // unmissable error line if the certificate is not ours. See
+        // [SignerIdentity] for why this exists and what it is not.
+        SignerIdentity.logIdentity(this)
+
+        // 1.2.9-r3 SECURITY: everything below touches the keystore and the
+        // filesystem, so it runs OFF the main thread - startup latency is a
+        // product feature on a VPN app that is often opened to fix a dead
+        // connection. None of it is needed before the first frame.
+        thread(name = "aether-secure-init", isDaemon = true) {
+            // F-3: a session that ended in a crash leaves the engine's identity
+            // (WireGuard private key + WARP device) in the clear. Put it away
+            // before anything else can read it. No-op while a tunnel is running.
+            runCatching { IdentityVault.sealIfIdle(filesDir) }
+            // F-5: load (or mint, once) the credential that LAN proxy clients must
+            // present, so the bridge is never asked to expose the network without
+            // one. Idempotent; the VPN service calls it too.
+            runCatching { ShareCredentials.ensure(this) }
+        }
+
+        // 1.2.9 AI: bind the AI store to the process, once.
+        //
+        // Here rather than in an Activity because the AI settings outlive any
+        // screen: the chat survives a back gesture, and the on-connect log analysis
+        // has to know whether it is switched on even when the app was started by
+        // the Quick Settings tile and no Activity was ever created. Attaching is
+        // idempotent and touches no network - it only opens a DataStore.
+        AiSession.attach(this)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(

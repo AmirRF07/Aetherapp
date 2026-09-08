@@ -68,8 +68,34 @@ val hasReleaseKeystore: Boolean =
 // done, every release-producing build prints the warning below, so it can never
 // happen again without somebody being told.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 1.2.9 HARDENING, ported from WhiteAestherMobile's signing setup.
+//
+// WhiteAestherMobile takes its release key from Gradle properties fed by CI
+// secrets and NOWHERE else: there is no key in that repository, and a build with
+// no credentials produces no signed release. This build used to fall back to the
+// committed `.github/ci-keystore.jks.b64` SILENTLY on any machine that had the
+// repo checked out, which means a clone of this repo is a working release-signing
+// setup for anyone who runs `gradle assembleRelease`.
+//
+// The fallback is now OPT-IN. CI is unaffected: the workflow writes a keystore to
+// a temp path and exports KEYSTORE_PATH, so it takes branch 1 or 2 above and
+// never reaches this one. What changes is that a local release build no longer
+// quietly signs with the public key - it fails and says why - unless the person
+// running it explicitly asks for that key with:
+//
+//     gradle assembleRelease -PaetherAllowPublicCiKey=true
+//
+// The file itself is deliberately NOT deleted. It is the certificate every
+// already-published release was signed with, so removing it would break in-place
+// updates for every existing user; that is a key rotation with a migration plan
+// (docs/SECURITY_AUDIT_1.2.7-r2.md 1.1), not a build-file edit.
+// ---------------------------------------------------------------------------
 val ciKeystoreB64 = rootProject.file(".github/ci-keystore.jks.b64")
-val useCiKeystore: Boolean = !hasReleaseKeystore && ciKeystoreB64.exists()
+val allowPublicCiKey: Boolean =
+    (project.findProperty("aetherAllowPublicCiKey") as? String)?.toBoolean() == true ||
+        System.getenv("AETHER_ALLOW_PUBLIC_CI_KEY")?.toBoolean() == true
+val useCiKeystore: Boolean = !hasReleaseKeystore && ciKeystoreB64.exists() && allowPublicCiKey
 val ciKeystoreFile = rootProject.file("build/ci-release.keystore")
 if (useCiKeystore) {
     ciKeystoreFile.parentFile.mkdirs()
@@ -98,8 +124,8 @@ android {
         applicationId = "studio.cluvex.aether"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "1.2.8"
+        versionCode = 13
+        versionName = "1.2.9"
 
         ndk {
             // We ship arm64 (primary) and arm builds.
@@ -126,8 +152,9 @@ android {
         // ------------------------------------------------------------------
         // 1.2.8-r5 BUILD IDENTITY.
         //
-        // versionName stays "1.2.8" and versionCode stays 12, as required. That
-        // is exactly the problem this field solves rather than papers over: r2,
+        // 1.2.9 ships as versionName "1.2.9" / versionCode 13, and PATCHLEVEL is
+        // "1.2.9" with it. The field stays, because it is what identifies a build
+        // beyond its version name: r2,
         // r3 and r4 were all "1.2.8 (12)", the engine banner printed only the
         // upstream core version (1.8.0) which is identical in all of them, and
         // so an APK from two rounds ago is indistinguishable from today's - in
@@ -142,6 +169,50 @@ android {
         val patchLevel = rootProject.file("PATCHLEVEL")
             .takeIf { it.exists() }?.readText()?.trim().orEmpty().ifBlank { "unstamped" }
         buildConfigField("String", "PATCH_LEVEL", "\"$patchLevel\"")
+
+        // ------------------------------------------------------------------
+        // 1.2.9-r3 SIGNER IDENTITY (audit F-1 mitigation).
+        //
+        // F-1 cannot be closed by editing a file: the release key is committed to
+        // this repository, and rotating it out is forbidden here because that
+        // certificate is what every published release was signed with - a new one
+        // would break in-place updates for every existing user.
+        //
+        // What is possible without touching the key is to make a build's identity
+        // CHECKABLE. The published signer fingerprint is compiled in, and
+        // studio.cluvex.aether.core.SignerIdentity compares it at runtime with the
+        // certificate that actually signed the running APK. A repackaged "Aether"
+        // signed by somebody else - the realistic attack on a VPN user in a
+        // censored network, handed out through a mirror or a Telegram channel -
+        // then says so in the About card and writes an ERROR line into the log on
+        // every launch, instead of looking exactly like the real thing.
+        //
+        // Source order: the real release certificate if this repository pins one,
+        // otherwise the CI certificate it actually publishes with. An unpinned
+        // build compiles in "" and reports "authenticity cannot be checked".
+        val expectedSigner = listOf(
+            rootProject.file(".github/expected-signer.txt"),
+            rootProject.file(".github/expected-signer-ci.txt"),
+        ).asSequence()
+            .filter { it.exists() }
+            .mapNotNull { file ->
+                Regex("(?m)^[0-9a-fA-F]{64}\$").find(file.readText())?.value?.lowercase()
+            }
+            .firstOrNull()
+            .orEmpty()
+        buildConfigField("String", "EXPECTED_SIGNER", "\"$expectedSigner\"")
+
+        // How this APK was signed, as known at configuration time. CI exports
+        // AETHER_SIGNING_MODE=release when the four signing secrets are present,
+        // and =test when it falls back to the public key committed to the repo, so
+        // the About card can tell the user which of the two they are holding.
+        val signingMode = System.getenv("AETHER_SIGNING_MODE")?.takeIf { it.isNotBlank() }
+            ?: when {
+                hasReleaseKeystore -> "release"
+                useCiKeystore -> "public-ci"
+                else -> "unsigned"
+            }
+        buildConfigField("String", "SIGNING_MODE", "\"$signingMode\"")
     }
 
     // Both native cores (libhev-socks5-tunnel.so + libaether.so) are prebuilt by
@@ -150,11 +221,21 @@ android {
 
     signingConfigs {
         create("release") {
-            // PLAY-PROTECT FIX: sign with the FULL modern scheme chain.
-            // AGP leaves v3 signing OFF by default; a complete v1+v2+v3
-            // signature protects the whole archive from tampering and is
-            // what reputable sideloaded apps ship with.
-            enableV1Signing = true
+            // Signature schemes: v2 + v3, NOT v1.
+            //
+            // The previous comment here claimed v1 was part of a "Play Protect
+            // fix". It is not, and it was the one line in this block that made the
+            // APK weaker. v1 is JAR signing: it authenticates individual entries
+            // rather than the archive, it is the scheme the Janus class of
+            // attacks targets, and it is only consulted by Android 6 and older.
+            // minSdk here is 26, so on every device this app can be installed on,
+            // v1 is dead weight that widens the attack surface and slows
+            // installation. WhiteAestherMobile ships v2+v3 for exactly this
+            // reason.
+            //
+            // Turning it off does not change the certificate, so in-place updates
+            // over previously published releases still install.
+            enableV1Signing = false
             enableV2Signing = true
             enableV3Signing = true
             if (hasReleaseKeystore) {
@@ -179,16 +260,21 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // PLAY-PROTECT FIX (root cause of the Google Play Protect
-            // "App blocked to protect your device" / "hasn't seen an app
-            // from this developer before" install warning): the old build
-            // silently fell back to the DEBUG key here. Debug certificates
-            // are auto-generated and DIFFERENT on every machine/CI runner,
-            // so to Google every release looked like a brand-new unknown
-            // developer and installs got flagged. A debug-signed release
-            // must never ship again: without a stable keystore the release
-            // build now FAILS FAST (guard below) instead of producing a
-            // flag-magnet APK. See docs/SIGNING.md.
+            // A release must never be debug-signed: debug certificates are
+            // auto-generated and different on every machine and CI runner, so
+            // each build looks like a different developer AND cannot install
+            // over the last one. Without a stable keystore the release build
+            // FAILS FAST (guard below) instead of producing such an APK.
+            //
+            // CORRECTION (1.2.9): the comment that used to sit here called this
+            // the "root cause of the Play Protect install warning". It is not.
+            // Stable signing fixes the update path and the "different developer
+            // every build" signal, and it is worth doing for both - but the
+            // dialog in the a1 report, "Play Protect hasn't seen this app before
+            // ... send this app to Google for a security scan", is Play Protect's
+            // unknown-APK scan prompt. It keys on the app being absent from
+            // Google's corpus, not on how it is signed, and no build
+            // configuration removes it. See docs/PLAY_PROTECT.md.
             signingConfig = if (hasReleaseKeystore || useCiKeystore) {
                 signingConfigs.getByName("release")
             } else {
@@ -243,11 +329,14 @@ if (!hasReleaseKeystore && !useCiKeystore) {
         ) {
             doFirst {
                 throw GradleException(
-                    "No stable release keystore configured — refusing to build a " +
-                        "debug-signed release (it triggers the Play Protect install " +
-                        "warning and breaks in-place updates). Run " +
-                        "scripts/generate-keystore.sh, or provide KEYSTORE_* env vars / " +
-                        ".github/ci-keystore.jks.b64. See docs/SIGNING.md."
+                    "No release keystore configured - refusing to build a " +
+                        "debug-signed release (it breaks in-place updates and makes " +
+                        "every build look like a different developer). Run " +
+                        "scripts/generate-keystore.sh, or provide the KEYSTORE_* env " +
+                        "vars. The public CI key in .github/ci-keystore.jks.b64 is no " +
+                        "longer used automatically; pass " +
+                        "-PaetherAllowPublicCiKey=true if you really want it. " +
+                        "See docs/SIGNING.md and docs/PLAY_PROTECT.md."
                 )
             }
         }
@@ -292,4 +381,11 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // Local JVM tests only. Deliberately the smallest possible addition: JUnit 4
+    // and nothing else, no Robolectric and no instrumentation, because the two
+    // things under test - AiRedaction and AiModelPolicy - are pure Kotlin by
+    // design. Test dependencies do not enter the APK and do not affect
+    // assembleRelease. Run with: gradle :app:testReleaseUnitTest
+    testImplementation("junit:junit:4.13.2")
 }

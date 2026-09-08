@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import studio.cluvex.aether.ai.AiSession
 import studio.cluvex.aether.core.AetherController
 import studio.cluvex.aether.core.IpEndpoint
 import studio.cluvex.aether.core.NetProbe
@@ -234,6 +235,33 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                             AetherController.setIpLoading(false)
+
+                            // 1.2.9 AI: analyse THIS session's log and propose
+                            // tuning, if the user asked for that.
+                            //
+                            // Here, at the end of the connected branch, and
+                            // deliberately not inside the VpnService: by this point
+                            // the tunnel is verified, the self-test has written its
+                            // results into the log, and the exit IP is known - so the
+                            // log the model reads is the complete story of the
+                            // connect rather than its first two seconds. AiSession
+                            // does the rest of the gating itself (feature off, no
+                            // key, wrong mode, too soon after the last run).
+                            uiProfile.value?.let { current ->
+                                AiSession.analyze(
+                                    profile = current,
+                                    state = AetherController.state.value,
+                                    persian = LanguagePrefs.isPersian(this@MainActivity),
+                                    auto = true,
+                                    onApply = { patched ->
+                                        // The UI owns the profile (see uiProfile), so
+                                        // an AI-applied change goes through exactly
+                                        // the same path a tapped switch does.
+                                        uiProfile.value = patched
+                                        profileSaves.tryEmit(patched)
+                                    },
+                                )
+                            }
                         }
                         "idle" -> {
                             AetherController.setIpInfo(null)

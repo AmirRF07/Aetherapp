@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Autorenew
-import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
@@ -51,10 +50,14 @@ enum class ButtonMode { IDLE, BUSY, CONNECTED, ERROR }
  *    screen - almost exactly the height the content block was missing at the
  *    bottom), and it cost a second set of additive strokes on every frame. The
  *    ring is gone; the travelling light lives on the connection card only.
- *  - **A tick, not a bolt.** The connected glyph is one large rounded tick. A
- *    bolt reads as "power", which is what the *idle* button already says; a tick
- *    reads as "you are through", which is the only thing this button has to
- *    communicate once the tunnel is up.
+ *  - **The app's own A, not a tick (1.2.9-r3).** The connected glyph used to be a
+ *    large rounded tick. A tick is what a form shows when it accepts an email
+ *    address: it says "done", it is the same glyph every other app on the phone
+ *    uses for the same thing, and it says nothing about WHICH tunnel is up. The
+ *    connected state now draws Aether's own mark - the exact A from the launcher
+ *    icon - lit, scanned and drifting through the app's accent ramp. See
+ *    [AetherMark]. It is composed ONLY in the connected state, so nothing about
+ *    the idle or busy button changed, including its frame cost.
  *  - **Nothing animates unless it must.** The halo pulse is composed only while
  *    connected and the sweep only while busy, so an idle screen subscribes to no
  *    frame callbacks at all. Both are read inside draw/layer lambdas, so a frame
@@ -149,27 +152,31 @@ fun ConnectButton(
                 }
             }
 
-            val icon = when (mode) {
-                ButtonMode.CONNECTED -> Icons.Rounded.Check
-                ButtonMode.BUSY -> Icons.Rounded.Autorenew
-                else -> Icons.Rounded.PowerSettingsNew
+            if (connected) {
+                // The brand mark, alive. Its own animations live in [AetherMark];
+                // this composable exists only in the connected state, so the idle
+                // and busy buttons still subscribe to nothing they did not before.
+                AetherMark(modifier = Modifier.size(MARK_SIZE))
+            } else {
+                val icon = when (mode) {
+                    ButtonMode.BUSY -> Icons.Rounded.Autorenew
+                    else -> Icons.Rounded.PowerSettingsNew
+                }
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = animatedAccent,
+                    modifier = Modifier
+                        .size(ICON_SIZE)
+                        .then(
+                            if (spin != null) {
+                                Modifier.graphicsLayer { rotationZ = spin.value }
+                            } else {
+                                Modifier
+                            },
+                        ),
+                )
             }
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = animatedAccent,
-                modifier = Modifier
-                    // One big tick when connected; the other glyphs keep their
-                    // original weight, where a huge icon would just look loud.
-                    .size(if (connected) TICK_SIZE else ICON_SIZE)
-                    .then(
-                        if (spin != null) {
-                            Modifier.graphicsLayer { rotationZ = spin.value }
-                        } else {
-                            Modifier
-                        },
-                    ),
-            )
         }
     }
 }
@@ -209,5 +216,10 @@ private val SWEEP = 116.dp
 private val CORE = 112.dp
 private val ICON_SIZE = 52.dp
 
-/** The connected tick, sized to fill the disc without touching its rim. */
-private val TICK_SIZE = 84.dp
+/**
+ * The connected mark, sized to fill the disc without touching its rim.
+ *
+ * 86 dp against the 132 dp disc: the mark's neon edge blooms outward by a couple
+ * of dp, and the old 84 dp tick had no bloom to leave room for.
+ */
+private val MARK_SIZE = 86.dp

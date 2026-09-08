@@ -50,6 +50,23 @@ val AetherErrorDim = Color(0xFF3A1522)
 /** Warning / "fair" quality. */
 val AetherAmber = Color(0xFFFFB74D)
 
+// ---- AI (1.2.9) -----------------------------------------------------------
+//
+// The assistant gets its OWN accent rather than reusing the primary blue, and
+// that is a functional decision rather than decoration: an AI icon sits directly
+// beside a switch, a chevron and a value label on the same settings row, all of
+// which are already primary blue. In one colour the row reads as four controls of
+// equal weight and the user cannot tell at a glance which mark opens an
+// explanation and which one changes their tunnel. The violet is one hue step off
+// the ramp - same darkness, same saturation family - so it belongs to the palette
+// while never being mistaken for an action.
+
+/** Everything the assistant owns: its icon, its bubbles, its accents. */
+val AetherViolet = Color(0xFF9B8CFF)
+
+/** Container tint behind an AI icon, matched to the ramp's elevation steps. */
+val AetherVioletDim = Color(0xFF241E4A)
+
 // ---- Text ----------------------------------------------------------------
 
 val OnDark = Color(0xFFE8EEF9)

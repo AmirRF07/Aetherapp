@@ -99,6 +99,21 @@ class SecretStore(context: Context) {
         const val ACCESS_SECRET = "access_client_secret"
         const val ACCESS_TOKEN = "access_token"
 
+        /**
+         * The user's own Gemini API key (1.2.9 AI features).
+         *
+         * Sealed here for the same reason the Access secret is, plus one that is
+         * specific to it: a Gemini key is a BILLABLE credential tied to the
+         * user's Google account, so a leak out of a backup or off a rooted
+         * device means somebody else spending the user's quota under the user's
+         * identity. It therefore never lands in the plain DataStore preferences
+         * file next to the MTU, it is scrubbed out of anything the AI layer
+         * sends to Google (see [studio.cluvex.aether.ai.AiRedaction]), and it
+         * travels in a request HEADER rather than a query string so it cannot
+         * end up inside a URL that something else logs.
+         */
+        const val GEMINI_KEY = "gemini_api_key"
+
         private const val PROVIDER = "AndroidKeyStore"
         private const val KEY_ALIAS = "aether_secret_v1"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"

@@ -136,6 +136,37 @@ fun DiagnosticsPanel(modifier: Modifier = Modifier, startExpanded: Boolean = fal
                         }
                     }
 
+                    // SAFE-TO-SHARE EXPORT (audit 1.2.9-r3, §6).
+                    //
+                    // "Copy logs" above hands over the log verbatim, which is right
+                    // for a private bug report and wrong for the place these logs
+                    // actually end up: a public issue, a Telegram group, a forum
+                    // post. Until now the safe option did not exist, so every
+                    // pasted log carried the exit IP, the WARP enrolment handle and
+                    // the endpoints the scan settled on. This runs the same
+                    // redaction the AI advisor uses, with no line cap.
+                    TextButton(
+                        onClick = {
+                            clipboard.setText(AnnotatedString(DiagnosticsLog.exportRedactedText()))
+                            Toast.makeText(
+                                context,
+                                context.getString(R.string.diag_copied_redacted),
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(androidx.compose.ui.res.stringResource(R.string.diag_copy_redacted))
+                    }
+
+                    if (DiagnosticsLog.persistedEncrypted) {
+                        Text(
+                            text = androidx.compose.ui.res.stringResource(R.string.diag_log_sealed),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+
                     Spacer(Modifier.height(12.dp))
 
                     LogConsole()

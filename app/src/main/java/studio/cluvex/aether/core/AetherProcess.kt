@@ -9,6 +9,14 @@ import java.io.File
  * Runs the native `aether` engine (shipped as libaether.so) as a child
  * process. On Android an executable packaged in jniLibs is extracted to
  * nativeLibraryDir with the exec bit set, which is exactly what we run.
+ *
+ * IDENTITY AT REST (audit 1.2.9-r3, F-3): the engine keeps its WARP identity and
+ * its WireGuard **private key** in `aether*.toml` next to the app's files, and it
+ * has no access to the Android Keystore to protect them. So this class owns that
+ * window: [IdentityVault.unsealInto] restores the files immediately before the
+ * engine is spawned and [IdentityVault.sealAndShred] puts them away as soon as it
+ * has been reaped. The plaintext exists only while the engine is running, which is
+ * the window in which the key is in its memory anyway.
  */
 class AetherProcess(
     private val nativeLibDir: String,
@@ -22,6 +30,11 @@ class AetherProcess(
             throw IllegalStateException("Engine binary missing: ${bin.absolutePath}")
         }
 
+        // Hand the engine its identity back BEFORE it looks for it. Cheap (a
+        // couple of small files) and it must not be skipped on the reconnect path,
+        // otherwise the engine re-provisions a new WARP device on every restart.
+        IdentityVault.unsealInto(workingDir)
+
         val command = mutableListOf(bin.absolutePath).apply { addAll(profile.toArgs()) }
         val builder = ProcessBuilder(command)
             .directory(workingDir)
@@ -34,6 +47,7 @@ class AetherProcess(
 
         val proc = builder.start()
         process = proc
+        IdentityVault.markRunning(true)
 
         // 1.2.8-r5: say which build this is BEFORE the engine speaks, so the
         // log identifies itself even if the engine dies immediately.
@@ -117,7 +131,13 @@ class AetherProcess(
      * process to actually exit and escalate to SIGKILL if it does not.
      */
     fun stop() {
-        val proc = process ?: return
+        val proc = process ?: run {
+            // Nothing to reap, but a previous session may still have left the
+            // identity in the clear (e.g. start() threw after the unseal).
+            IdentityVault.markRunning(false)
+            IdentityVault.sealAndShred(workingDir)
+            return
+        }
         process = null
         runCatching {
             proc.destroy()
@@ -130,6 +150,11 @@ class AetherProcess(
                 proc.destroyForcibly()
             }
         }
+        // The engine is gone, so the identity files are nobody's working set any
+        // more: seal them and shred the plaintext. Done AFTER the reap on purpose -
+        // sealing a file the engine is still writing would race its own save.
+        IdentityVault.markRunning(false)
+        IdentityVault.sealAndShred(workingDir)
     }
 
     private companion object {

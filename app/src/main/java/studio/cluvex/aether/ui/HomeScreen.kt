@@ -3,6 +3,7 @@ package studio.cluvex.aether.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,7 +12,9 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.BugReport
+import androidx.compose.material.icons.rounded.Chat
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Settings
@@ -56,6 +59,7 @@ import studio.cluvex.aether.ui.settings.SettingsHost
 import studio.cluvex.aether.ui.settings.SettingsNavRow
 import studio.cluvex.aether.ui.settings.SettingsRoute
 import studio.cluvex.aether.ui.theme.AetherMint
+import studio.cluvex.aether.ui.theme.AetherViolet
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -145,6 +149,27 @@ fun HomeScreen(
                         settingsRoute = route
                         drawerScope.launch { drawerState.close() }
                     }
+
+                    // 1.2.9 AI: its own group at the top of the menu. The
+                    // assistant is not a setting, it is a place you go - and a
+                    // feature nobody can find is a feature that does not exist.
+                    SettingsGroup {
+                        SettingsNavRow(
+                            title = stringResource(R.string.ai_title),
+                            summary = stringResource(R.string.ai_subtitle),
+                            icon = Icons.Rounded.AutoAwesome,
+                            onClick = { go(SettingsRoute.AI) },
+                        )
+                        RowDivider()
+                        SettingsNavRow(
+                            title = stringResource(R.string.ai_chat_open),
+                            summary = stringResource(R.string.ai_chat_subtitle),
+                            icon = Icons.Rounded.Chat,
+                            onClick = { go(SettingsRoute.AI_CHAT) },
+                        )
+                    }
+
+                    Spacer(Modifier.height(14.dp))
 
                     SettingsGroup {
                         SettingsNavRow(
@@ -250,19 +275,39 @@ fun HomeScreen(
                 )
             }
 
-            // Straight into the settings screen, one tap from the home screen.
-            IconButton(
-                onClick = { settingsRoute = SettingsRoute.HOME },
+            // Top-end corner: the AI chat and the tunnel shortcut, in that order.
+            //
+            // 1.2.9: the SHORTCUT to the tunnel settings - Connection, Transport &
+            // anti-DPI, DNS & routing, Upstream proxy, and the reset action. The
+            // full settings tree lives in the drawer (top start), which is where
+            // every other group belongs; this icon used to open that same tree.
+            //
+            // The AI button sits beside it rather than anywhere in the middle of the
+            // screen on purpose: the home screen is measured by FitToHeight and
+            // scaled to fit exactly, so ANY new element inside that subtree shrinks
+            // the connect button on small phones. Both icons live outside it, in the
+            // inset padding, where they cost the layout nothing.
+            Row(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .statusBarsPadding()
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.Tune,
-                    contentDescription = stringResource(R.string.advanced_open),
-                    tint = MaterialTheme.colorScheme.onBackground,
-                )
+                IconButton(onClick = { settingsRoute = SettingsRoute.AI_CHAT }) {
+                    Icon(
+                        imageVector = Icons.Rounded.AutoAwesome,
+                        contentDescription = stringResource(R.string.ai_title),
+                        tint = AetherViolet,
+                    )
+                }
+                IconButton(onClick = { settingsRoute = SettingsRoute.QUICK }) {
+                    Icon(
+                        imageVector = Icons.Rounded.Tune,
+                        contentDescription = stringResource(R.string.advanced_open),
+                        tint = MaterialTheme.colorScheme.onBackground,
+                    )
+                }
             }
         }
     }

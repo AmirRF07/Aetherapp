@@ -1,8 +1,8 @@
 [package]
 name = "aether"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.91"
 # >>> AETHER-APP-PATCH build-provenance
 # Stamps the APP patch level into the binary. See build.rs for the full reason;
 # short version: r2/r3/r4 were byte-indistinguishable from the outside and a
@@ -82,6 +82,18 @@ futures = "0.3"
 # `netstack.rs` (`set_congestion_control`), so a future feature-list edit cannot
 # silently switch it back off: without the feature the enum variant does not
 # exist and the build fails loudly instead of shipping this bug again.
+#
+# 1.2.9 CORE 1.9.0 REBASE - why the version stays at 0.12 while upstream moved
+# to 0.14. Upstream 1.9.0 bumped smoltcp to 0.14 AND kept its feature list
+# without a congestion-control algorithm, i.e. exactly the r4 root cause above.
+# Taking that line would have done two separate things at once: revert the
+# congestion controller, and move the app's own 2600-line netstack (which is an
+# app patch in full, written against the 0.12 socket API) onto a new major
+# release of the crate that terminates every TCP flow on the device. The engine
+# upgrade for 1.2.9 was required to leave download speed and connect behaviour
+# exactly as 1.2.8 tuned them, so the pin stays and the CUBIC feature stays with
+# it. A 0.14 rebase is a data-plane change of its own and belongs in a release
+# that can be field-tested as one.
 # ============================================================================
 # >>> AETHER-APP-PATCH netstack-congestion-control
 smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp", "socket-tcp-cubic"] }

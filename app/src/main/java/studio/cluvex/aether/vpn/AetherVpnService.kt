@@ -34,6 +34,7 @@ import studio.cluvex.aether.core.SocksTunBridge
 import studio.cluvex.aether.core.TunnelConfig
 import studio.cluvex.aether.data.LanguagePrefs
 import studio.cluvex.aether.data.SecretStore
+import studio.cluvex.aether.data.ShareCredentials
 import studio.cluvex.aether.model.ConnectionProfile
 import studio.cluvex.aether.model.ConnectionState
 import studio.cluvex.aether.model.Noize
@@ -288,6 +289,12 @@ class AetherVpnService : VpnService() {
         if (port != wantedPort) {
             DiagnosticsLog.w(TAG, "${profile.backend.pipelineLabel} exposed SOCKS5 on $port (expected $wantedPort).")
         }
+
+        // 1.2.9-r3 (F-5): the LAN listeners authenticate remote clients, so the
+        // credential has to be loaded BEFORE they bind. Synchronous on purpose -
+        // one keystore-backed decrypt on a background coroutine - because the
+        // bridge otherwise falls back to an ephemeral password the user cannot see.
+        if (profile.lanShare) runCatching { ShareCredentials.ensure(this) }
 
         if (profile.proxyMode) {
             check(ShareBridge.startSync(localOnly = !profile.lanShare, upstreamPort = port)) {
@@ -661,6 +668,7 @@ class AetherVpnService : VpnService() {
             // instead of claiming "Local proxy ready" over dead ports (the old
             // fire-and-forget start swallowed EADDRINUSE and still reported
             // 1080/8118 as ready — external apps then couldn't connect).
+            if (profile.lanShare) runCatching { ShareCredentials.ensure(this) }
             val shareReady =
                 ShareBridge.startSync(localOnly = !profile.lanShare, upstreamPort = SOCKS_PORT)
             if (!shareReady) {
@@ -678,8 +686,13 @@ class AetherVpnService : VpnService() {
             establishTun(profile)
             startTun2Socks(profile, SOCKS_PORT)
             // LAN sharing: if the user enabled it, expose the tunnel to other
-            // devices on the same Wi-Fi/hotspot (HTTP + SOCKS5 bridge).
-            if (profile.lanShare) ShareBridge.start(localOnly = false, upstreamPort = SOCKS_PORT)
+            // devices on the same Wi-Fi/hotspot (HTTP + SOCKS5 bridge). Remote
+            // clients must authenticate (1.2.9-r3, F-5), so load the credential
+            // first.
+            if (profile.lanShare) {
+                runCatching { ShareCredentials.ensure(this) }
+                ShareBridge.start(localOnly = false, upstreamPort = SOCKS_PORT)
+            }
         }
 
         // GATING FIX: the app used to report Connected the moment the TUN /

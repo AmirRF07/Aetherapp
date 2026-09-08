@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.BugReport
@@ -32,6 +33,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -45,6 +48,8 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import studio.cluvex.aether.R
+import studio.cluvex.aether.ai.AiSession
+import studio.cluvex.aether.ai.AiTopic
 import studio.cluvex.aether.core.ShareBridge
 import studio.cluvex.aether.data.AppLanguage
 import studio.cluvex.aether.data.LanguagePrefs
@@ -63,6 +68,11 @@ import studio.cluvex.aether.model.TransportBackend
 import studio.cluvex.aether.transport.ExitRegions
 import studio.cluvex.aether.ui.AboutPanel
 import studio.cluvex.aether.ui.SharePanel
+import studio.cluvex.aether.ui.ai.AiAdvisorPage
+import studio.cluvex.aether.ui.ai.AiChatScreen
+import studio.cluvex.aether.ui.ai.AiHostContext
+import studio.cluvex.aether.ui.ai.AiSettingsPage
+import studio.cluvex.aether.ui.ai.LocalAiHost
 import studio.cluvex.aether.ui.components.AppPickerDialog
 import studio.cluvex.aether.ui.components.DiagnosticsPanel
 import studio.cluvex.aether.ui.components.LtrOutlinedTextField
@@ -78,6 +88,17 @@ import studio.cluvex.aether.ui.components.SegmentedSelector
  */
 enum class SettingsRoute {
     HOME,
+
+    /**
+     * The shortcut page behind the tune icon on the home screen (1.2.9).
+     *
+     * ROOT CAUSE it fixes: that icon and the drawer's "Settings" row both opened
+     * [HOME], so the same full settings tree - This device, App, everything -
+     * appeared in a place that is meant to be a shortcut to the tunnel itself.
+     * This route shows the Tunnel group and the reset action ONLY; everything
+     * else stays where it belongs, in the drawer's Settings.
+     */
+    QUICK,
     CONNECTION,
     TRANSPORT,
     DNS_ROUTING,
@@ -87,6 +108,19 @@ enum class SettingsRoute {
     SECURITY,
     ENGINE,
     APPEARANCE,
+
+    /**
+     * 1.2.9 AI: the assistant's own settings (key, model, behaviour), the chat, and
+     * the log/DPI advisor.
+     *
+     * Three routes rather than one screen with tabs, for the reason the whole
+     * settings area is built this way: only the open page is composed, so the chat
+     * - which owns a text field, an animated indicator and an auto-scrolling list -
+     * costs nothing at all while the user is reading about their API key.
+     */
+    AI,
+    AI_CHAT,
+    AI_ADVISOR,
     DIAGNOSTICS,
     SHARE,
     ABOUT,
@@ -108,9 +142,20 @@ fun SettingsHost(
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // QUICK is a ROOT, not a page under HOME: back from the shortcut page has to
+    // leave settings, not descend into the full tree the shortcut exists to avoid.
+    //
+    // 1.2.9: AI_CHAT is a root for exactly the same reason. It is opened straight
+    // from the home screen's AI button, and backing out of a chat into the settings
+    // list would be the same bug in a new place.
     val stack = remember {
-        mutableStateListOf(SettingsRoute.HOME).also {
-            if (start != SettingsRoute.HOME) it.add(start)
+        val root = when (start) {
+            SettingsRoute.QUICK -> SettingsRoute.QUICK
+            SettingsRoute.AI_CHAT -> SettingsRoute.AI_CHAT
+            else -> SettingsRoute.HOME
+        }
+        mutableStateListOf(root).also {
+            if (start != root && start != SettingsRoute.HOME) it.add(start)
         }
     }
     val route = stack.last()
@@ -130,8 +175,31 @@ fun SettingsHost(
     // command-line flags handed to a process that is already running.
     val editable = state is ConnectionState.Idle || state is ConnectionState.Error
 
+    // 1.2.9 AI: ONE provider for the whole settings area.
+    //
+    // Every AI icon in every page reads its context from here (see
+    // [studio.cluvex.aether.ui.ai.AiHostContext]), which is what keeps "an AI icon
+    // next to every option" from meaning "two extra parameters on every row, page
+    // and call site in the settings tree". It also means the icons vanish
+    // everywhere at once when the user turns the hints off.
+    val aiSettings by AiSession.settings.collectAsState()
+    CompositionLocalProvider(
+        LocalAiHost provides AiHostContext(
+            profile = profile,
+            state = state,
+            enabled = aiSettings.showHints,
+            openAiSettings = { open(SettingsRoute.AI) },
+            openConnection = { open(SettingsRoute.CONNECTION) },
+            // Lets any explanation sheet, anywhere in the settings tree, hand its
+            // topic to the assistant and land the user in the chat. Wired here
+            // because this is the only place in the app that owns the stack.
+            openChat = { open(SettingsRoute.AI_CHAT) },
+        ),
+    ) {
     when (route) {
         SettingsRoute.HOME -> SettingsHomePage(profile, editable, open, onProfileChange, onClose, modifier)
+        SettingsRoute.QUICK ->
+            SettingsHomePage(profile, editable, open, onProfileChange, onClose, modifier, quick = true)
         SettingsRoute.CONNECTION -> ConnectionPage(profile, editable, onProfileChange, back, modifier)
         SettingsRoute.TRANSPORT -> TransportPage(profile, editable, onProfileChange, back, modifier)
         SettingsRoute.DNS_ROUTING -> DnsRoutingPage(profile, editable, onProfileChange, back, modifier)
@@ -155,6 +223,29 @@ fun SettingsHost(
         SettingsRoute.ABOUT -> PanelPage(stringResource(R.string.about_title), back, modifier) {
             AboutPanel(startExpanded = true)
         }
+        SettingsRoute.AI -> AiSettingsPage(
+            profile = profile,
+            state = state,
+            onBack = back,
+            onOpenChat = { open(SettingsRoute.AI_CHAT) },
+            onOpenAdvisor = { open(SettingsRoute.AI_ADVISOR) },
+            modifier = modifier,
+        )
+        SettingsRoute.AI_CHAT -> AiChatScreen(
+            state = state,
+            profile = profile,
+            onProfileChange = onProfileChange,
+            onBack = back,
+            modifier = modifier,
+        )
+        SettingsRoute.AI_ADVISOR -> AiAdvisorPage(
+            profile = profile,
+            state = state,
+            onProfileChange = onProfileChange,
+            onBack = back,
+            modifier = modifier,
+        )
+    }
     }
 }
 
@@ -168,11 +259,21 @@ private fun SettingsHomePage(
     onProfileChange: (ConnectionProfile) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * 1.2.9: the shortcut page ([SettingsRoute.QUICK]) is this same page with the
+     * Tunnel group and the reset action only. One page, one set of metrics, no
+     * second copy of four navigation rows to drift out of step with these.
+     */
+    quick: Boolean = false,
 ) {
     var confirmReset by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
-    SettingsScaffold(stringResource(R.string.settings_title), onBack, modifier) {
+    val title =
+        if (quick) stringResource(R.string.quick_settings_title)
+        else stringResource(R.string.settings_title)
+
+    SettingsScaffold(title, onBack, modifier) {
         if (!editable) {
             settingsSection {
                 SettingsGroup {
@@ -196,6 +297,7 @@ private fun SettingsHomePage(
                     icon = Icons.Rounded.Layers,
                     value = backendShortLabel(profile.backend),
                     onClick = { onOpen(SettingsRoute.CONNECTION) },
+                    aiTopic = AiTopic.BACKEND,
                 )
                 RowDivider()
                 SettingsNavRow(
@@ -204,6 +306,7 @@ private fun SettingsHomePage(
                     icon = Icons.Rounded.Bolt,
                     value = noizeLabel(profile.noize),
                     onClick = { onOpen(SettingsRoute.TRANSPORT) },
+                    aiTopic = AiTopic.NOIZE,
                 )
                 RowDivider()
                 SettingsNavRow(
@@ -211,6 +314,7 @@ private fun SettingsHomePage(
                     summary = stringResource(R.string.cat_dns_routing_desc),
                     icon = Icons.Rounded.Dns,
                     onClick = { onOpen(SettingsRoute.DNS_ROUTING) },
+                    aiTopic = AiTopic.DNS,
                 )
                 RowDivider()
                 SettingsNavRow(
@@ -218,11 +322,12 @@ private fun SettingsHomePage(
                     summary = stringResource(R.string.cat_upstream_desc),
                     icon = Icons.Rounded.Link,
                     onClick = { onOpen(SettingsRoute.UPSTREAM) },
+                    aiTopic = AiTopic.UPSTREAM,
                 )
             }
         }
 
-        settingsSection {
+        if (!quick) settingsSection {
             GroupCaption(stringResource(R.string.cat_group_device))
             SettingsGroup {
                 SettingsNavRow(
@@ -230,6 +335,7 @@ private fun SettingsHomePage(
                     summary = stringResource(R.string.cat_apps_desc),
                     icon = Icons.Rounded.Apps,
                     onClick = { onOpen(SettingsRoute.APPS) },
+                    aiTopic = AiTopic.SPLIT_MODE,
                 )
                 RowDivider()
                 SettingsNavRow(
@@ -237,6 +343,7 @@ private fun SettingsHomePage(
                     summary = stringResource(R.string.cat_security_desc),
                     icon = Icons.Rounded.Lock,
                     onClick = { onOpen(SettingsRoute.SECURITY) },
+                    aiTopic = AiTopic.KILL_SWITCH,
                 )
                 RowDivider()
                 SettingsNavRow(
@@ -244,11 +351,28 @@ private fun SettingsHomePage(
                     summary = stringResource(R.string.share_subtitle),
                     icon = Icons.Rounded.Wifi,
                     onClick = { onOpen(SettingsRoute.SHARE) },
+                    aiTopic = AiTopic.SHARE,
                 )
             }
         }
 
-        settingsSection {
+        // 1.2.9 AI: first row of the App group, because it is the entry point to
+        // three screens rather than one setting - and because a user who has not
+        // set a key yet needs to find it without reading the whole tree.
+        if (!quick) settingsSection {
+            GroupCaption(stringResource(R.string.cat_ai))
+            SettingsGroup {
+                SettingsNavRow(
+                    title = stringResource(R.string.ai_title),
+                    summary = stringResource(R.string.cat_ai_desc),
+                    icon = Icons.Rounded.AutoAwesome,
+                    onClick = { onOpen(SettingsRoute.AI) },
+                    aiTopic = AiTopic.AI_CHAT,
+                )
+            }
+        }
+
+        if (!quick) settingsSection {
             GroupCaption(stringResource(R.string.cat_group_app))
             SettingsGroup {
                 SettingsNavRow(
@@ -257,6 +381,7 @@ private fun SettingsHomePage(
                     icon = Icons.Rounded.Language,
                     value = languageLabel(LanguagePrefs.read(context)),
                     onClick = { onOpen(SettingsRoute.APPEARANCE) },
+                    aiTopic = AiTopic.LANGUAGE,
                 )
                 RowDivider()
                 SettingsNavRow(
@@ -264,6 +389,7 @@ private fun SettingsHomePage(
                     summary = stringResource(R.string.diag_subtitle),
                     icon = Icons.Rounded.BugReport,
                     onClick = { onOpen(SettingsRoute.DIAGNOSTICS) },
+                    aiTopic = AiTopic.DIAGNOSTICS,
                 )
                 RowDivider()
                 SettingsNavRow(
@@ -271,6 +397,7 @@ private fun SettingsHomePage(
                     summary = stringResource(R.string.cat_engine_desc),
                     icon = Icons.Rounded.Tune,
                     onClick = { onOpen(SettingsRoute.ENGINE) },
+                    aiTopic = AiTopic.TLS_GROUPS,
                 )
                 RowDivider()
                 SettingsNavRow(
@@ -278,6 +405,7 @@ private fun SettingsHomePage(
                     summary = stringResource(R.string.cat_zerotrust_desc),
                     icon = Icons.Rounded.VpnKey,
                     onClick = { onOpen(SettingsRoute.ZERO_TRUST) },
+                    aiTopic = AiTopic.ZERO_TRUST,
                 )
                 RowDivider()
                 SettingsNavRow(
@@ -298,6 +426,7 @@ private fun SettingsHomePage(
                     enabled = editable,
                     destructive = true,
                     onClick = { confirmReset = true },
+                    aiTopic = AiTopic.RESET,
                 )
             }
         }
@@ -349,6 +478,7 @@ private fun ConnectionPage(
                 label = { backendShortLabel(it) },
                 onSelect = { onProfileChange(profile.copy(backend = it)) },
                 enabled = editable,
+                aiTopic = AiTopic.BACKEND,
             )
             RowDivider()
             SettingsChoiceRow(
@@ -363,6 +493,7 @@ private fun ConnectionPage(
                     null -> stringResource(R.string.exit_help_aether)
                     ExternalKind.PSIPHON -> stringResource(R.string.exit_help_psiphon)
                 },
+                aiTopic = AiTopic.EXIT_REGION,
             )
         }
         GroupFooter(backendHelp(profile.backend))
@@ -371,7 +502,7 @@ private fun ConnectionPage(
     settingsSection {
         GroupCaption(stringResource(R.string.section_core))
         SettingsGroup {
-            SettingsBlock(title = stringResource(R.string.protocol)) {
+            SettingsBlock(title = stringResource(R.string.protocol), aiTopic = AiTopic.PROTOCOL) {
                 SegmentedSelector(
                     options = Protocol.entries,
                     selected = profile.protocol,
@@ -389,9 +520,10 @@ private fun ConnectionPage(
                 label = { scanLabel(it) },
                 onSelect = { onProfileChange(profile.copy(scanMode = it)) },
                 enabled = editable && profile.backend.usesAetherEngine,
+                aiTopic = AiTopic.SCAN_MODE,
             )
             RowDivider(inset = false)
-            SettingsBlock(title = stringResource(R.string.ip_version)) {
+            SettingsBlock(title = stringResource(R.string.ip_version), aiTopic = AiTopic.IP_VERSION) {
                 SegmentedSelector(
                     options = IpVersion.entries,
                     selected = profile.ipVersion,
@@ -424,13 +556,14 @@ private fun TransportPage(
                 label = { noizeLabel(it) },
                 onSelect = { onProfileChange(profile.copy(noize = it)) },
                 enabled = editable && profile.backend.usesAetherEngine,
+                aiTopic = AiTopic.NOIZE,
             )
         }
         GroupFooter(stringResource(R.string.noize_desc))
     }
 
     settingsSection {
-        GroupCaption(stringResource(R.string.endpoint_mode))
+        GroupCaption(stringResource(R.string.endpoint_mode), aiTopic = AiTopic.ENDPOINT_MODE)
         SettingsGroup {
             SettingsBlock {
                 SegmentedSelector(
@@ -443,7 +576,7 @@ private fun TransportPage(
             }
             if (profile.endpointMode == EndpointMode.MANUAL_PEER) {
                 RowDivider(inset = false)
-                SettingsBlock {
+                SettingsBlock(aiTopic = AiTopic.MANUAL_PEER) {
                     LtrOutlinedTextField(
                         value = profile.manualPeer,
                         onValueChange = { onProfileChange(profile.copy(manualPeer = it)) },
@@ -457,7 +590,7 @@ private fun TransportPage(
             }
             if (profile.endpointMode == EndpointMode.MANUAL_RANGE) {
                 RowDivider(inset = false)
-                SettingsBlock {
+                SettingsBlock(aiTopic = AiTopic.MANUAL_RANGE) {
                     LtrOutlinedTextField(
                         value = profile.manualRange,
                         onValueChange = { onProfileChange(profile.copy(manualRange = it)) },
@@ -483,6 +616,7 @@ private fun TransportPage(
                 label = { if (it == 0) stringResource(R.string.keepalive_default) else "$it" },
                 onSelect = { onProfileChange(profile.copy(keepalive = it)) },
                 enabled = editable,
+                aiTopic = AiTopic.KEEPALIVE,
             )
             RowDivider(inset = false)
             SettingsChoiceRow(
@@ -492,6 +626,7 @@ private fun TransportPage(
                 label = { "$it" },
                 onSelect = { onProfileChange(profile.copy(mtu = it)) },
                 enabled = editable,
+                aiTopic = AiTopic.MTU,
             )
         }
         GroupFooter(stringResource(R.string.mtu_desc))
@@ -506,6 +641,7 @@ private fun TransportPage(
                 checked = profile.fragment,
                 enabled = editable,
                 onCheckedChange = { onProfileChange(profile.copy(fragment = it)) },
+                aiTopic = AiTopic.FRAGMENT,
             )
             RowDivider(inset = false)
             SettingsSwitchRow(
@@ -514,6 +650,7 @@ private fun TransportPage(
                 checked = profile.ech,
                 enabled = editable,
                 onCheckedChange = { onProfileChange(profile.copy(ech = it)) },
+                aiTopic = AiTopic.ECH,
             )
             RowDivider(inset = false)
             SettingsSwitchRow(
@@ -522,6 +659,7 @@ private fun TransportPage(
                 checked = profile.masqueHttp2,
                 enabled = editable,
                 onCheckedChange = { onProfileChange(profile.copy(masqueHttp2 = it)) },
+                aiTopic = AiTopic.MASQUE_HTTP2,
             )
             RowDivider(inset = false)
             SettingsSwitchRow(
@@ -530,6 +668,7 @@ private fun TransportPage(
                 checked = profile.quickReconnect,
                 enabled = editable,
                 onCheckedChange = { onProfileChange(profile.copy(quickReconnect = it)) },
+                aiTopic = AiTopic.QUICK_RECONNECT,
             )
             if (profile.quickReconnect) {
                 RowDivider(inset = false)
@@ -539,6 +678,7 @@ private fun TransportPage(
                     checked = profile.fastEndpointOnly,
                     enabled = editable,
                     onCheckedChange = { onProfileChange(profile.copy(fastEndpointOnly = it)) },
+                    aiTopic = AiTopic.FAST_ENDPOINT,
                 )
             }
         }
@@ -558,7 +698,7 @@ private fun DnsRoutingPage(
     settingsSection {
         GroupCaption(stringResource(R.string.dns_label))
         SettingsGroup {
-            SettingsBlock(helper = stringResource(R.string.dns_help)) {
+            SettingsBlock(helper = stringResource(R.string.dns_help), aiTopic = AiTopic.DNS) {
                 LtrOutlinedTextField(
                     value = profile.dnsServers,
                     onValueChange = { onProfileChange(profile.copy(dnsServers = it)) },
@@ -573,9 +713,9 @@ private fun DnsRoutingPage(
     }
 
     settingsSection {
-        GroupCaption(stringResource(R.string.section_routes))
+        GroupCaption(stringResource(R.string.section_routes), aiTopic = AiTopic.ROUTE_BLOCK)
         SettingsGroup {
-            SettingsBlock {
+            SettingsBlock(aiTopic = AiTopic.ROUTE_DIRECT) {
                 LtrOutlinedTextField(
                     value = profile.routeBlock,
                     onValueChange = { onProfileChange(profile.copy(routeBlock = it)) },
@@ -603,10 +743,11 @@ private fun DnsRoutingPage(
                 checked = profile.routeSniff,
                 enabled = editable,
                 onCheckedChange = { onProfileChange(profile.copy(routeSniff = it)) },
+                aiTopic = AiTopic.ROUTE_SNIFF,
             )
             if (profile.routeSniff) {
                 RowDivider(inset = false)
-                SettingsBlock {
+                SettingsBlock(aiTopic = AiTopic.ROUTE_SNIFF_MS) {
                     LtrOutlinedTextField(
                         value = if (profile.routeSniffMs == 0) "" else profile.routeSniffMs.toString(),
                         onValueChange = {
@@ -641,7 +782,7 @@ private fun UpstreamPage(
 ) = SettingsScaffold(stringResource(R.string.section_upstream), onBack, modifier) {
     settingsSection {
         SettingsGroup {
-            SettingsBlock {
+            SettingsBlock(aiTopic = AiTopic.UPSTREAM) {
                 LtrOutlinedTextField(
                     value = profile.upstreamProxy,
                     onValueChange = { onProfileChange(profile.copy(upstreamProxy = it)) },
@@ -677,6 +818,7 @@ private fun ZeroTrustPage(
                 label = { teamAuthLabel(it) },
                 onSelect = { onProfileChange(profile.copy(teamAuth = it)) },
                 enabled = editable,
+                aiTopic = AiTopic.ZERO_TRUST,
             )
         }
         GroupFooter(stringResource(R.string.team_auth_desc))
@@ -753,6 +895,7 @@ private fun ZeroTrustPage(
                     checked = profile.gateway,
                     enabled = editable,
                     onCheckedChange = { onProfileChange(profile.copy(gateway = it)) },
+                    aiTopic = AiTopic.GATEWAY,
                 )
             }
         }
@@ -788,6 +931,7 @@ private fun AppsPage(
                     checked = profile.proxyMode,
                     enabled = editable,
                     onCheckedChange = { onProfileChange(profile.copy(proxyMode = it)) },
+                    aiTopic = AiTopic.PROXY_MODE,
                 )
                 if (profile.proxyMode) {
                     RowDivider(inset = false)
@@ -817,7 +961,7 @@ private fun AppsPage(
         }
 
         settingsSection {
-            GroupCaption(stringResource(R.string.split_mode))
+            GroupCaption(stringResource(R.string.split_mode), aiTopic = AiTopic.SPLIT_MODE)
             SettingsGroup {
                 SettingsBlock {
                     SegmentedSelector(
@@ -835,6 +979,7 @@ private fun AppsPage(
                         icon = Icons.Rounded.Apps,
                         enabled = editable,
                         onClick = { showSplitPicker = true },
+                        aiTopic = AiTopic.BLOCKED_APPS,
                     )
                 }
             }
@@ -847,6 +992,7 @@ private fun AppsPage(
                     icon = Icons.Rounded.Block,
                     enabled = editable,
                     onClick = { showBlockedPicker = true },
+                    aiTopic = AiTopic.BLOCKED_APPS,
                 )
             }
             GroupFooter(stringResource(R.string.blocked_apps_desc))
@@ -906,6 +1052,7 @@ private fun SecurityPage(
                 checked = profile.killSwitch,
                 enabled = editable,
                 onCheckedChange = { onProfileChange(profile.copy(killSwitch = it)) },
+                aiTopic = AiTopic.KILL_SWITCH,
             )
             if (profile.killSwitch) {
                 RowDivider()
@@ -915,6 +1062,7 @@ private fun SecurityPage(
                     checked = profile.strictKillSwitch,
                     enabled = editable,
                     onCheckedChange = { onProfileChange(profile.copy(strictKillSwitch = it)) },
+                    aiTopic = AiTopic.STRICT_KILL,
                 )
             }
             RowDivider(inset = false)
@@ -924,6 +1072,7 @@ private fun SecurityPage(
                 checked = profile.ipv6LeakProtection,
                 enabled = editable,
                 onCheckedChange = { onProfileChange(profile.copy(ipv6LeakProtection = it)) },
+                aiTopic = AiTopic.IPV6_LEAK,
             )
         }
     }
@@ -937,6 +1086,7 @@ private fun SecurityPage(
                 checked = profile.autoReprovision,
                 enabled = editable,
                 onCheckedChange = { onProfileChange(profile.copy(autoReprovision = it)) },
+                aiTopic = AiTopic.REPROVISION,
             )
             RowDivider(inset = false)
             SettingsSwitchRow(
@@ -945,6 +1095,7 @@ private fun SecurityPage(
                 checked = profile.smartReconnect,
                 enabled = editable,
                 onCheckedChange = { onProfileChange(profile.copy(smartReconnect = it)) },
+                aiTopic = AiTopic.SMART_RECONNECT,
             )
             if (profile.smartReconnect) {
                 RowDivider(inset = false)
@@ -955,6 +1106,7 @@ private fun SecurityPage(
                     label = { "$it" },
                     onSelect = { onProfileChange(profile.copy(reconnectRetryLimit = it)) },
                     enabled = editable,
+                    aiTopic = AiTopic.RECONNECT_LIMIT,
                 )
             }
         }
@@ -973,9 +1125,9 @@ private fun EnginePage(
 ) = SettingsScaffold(stringResource(R.string.section_engine_tuning), onBack, modifier) {
     if (profile.fragment) {
         settingsSection {
-            GroupCaption(stringResource(R.string.fragment_title))
+            GroupCaption(stringResource(R.string.fragment_title), aiTopic = AiTopic.FRAGMENT_SIZE)
             SettingsGroup {
-                SettingsBlock {
+                SettingsBlock(aiTopic = AiTopic.FRAGMENT_DELAY) {
                     LtrOutlinedTextField(
                         value = profile.fragmentSize,
                         onValueChange = { onProfileChange(profile.copy(fragmentSize = it)) },
@@ -1003,7 +1155,12 @@ private fun EnginePage(
     settingsSection {
         GroupCaption(stringResource(R.string.cat_group_tuning))
         SettingsGroup {
-            SettingsBlock {
+            // AI-ICON COVERAGE: these were three unrelated fields inside ONE
+            // block, so a single icon labelled "TLS groups" was the only
+            // explanation available for the validation and reconnect timeouts as
+            // well - and AiTopic.RECONNECT_SECS existed with nothing pointing at
+            // it. One block per field, one icon per field.
+            SettingsBlock(aiTopic = AiTopic.TLS_GROUPS) {
                 LtrOutlinedTextField(
                     value = profile.tlsGroups,
                     onValueChange = { onProfileChange(profile.copy(tlsGroups = it)) },
@@ -1013,7 +1170,9 @@ private fun EnginePage(
                     placeholder = { Text(stringResource(R.string.tls_groups_hint)) },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(12.dp))
+            }
+            RowDivider(inset = false)
+            SettingsBlock(aiTopic = AiTopic.VALIDATE_SECS) {
                 LtrOutlinedTextField(
                     value = if (profile.validateSecs == 0) "" else profile.validateSecs.toString(),
                     onValueChange = {
@@ -1027,7 +1186,9 @@ private fun EnginePage(
                     placeholder = { Text(stringResource(R.string.secs_hint)) },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(12.dp))
+            }
+            RowDivider(inset = false)
+            SettingsBlock(aiTopic = AiTopic.RECONNECT_SECS) {
                 LtrOutlinedTextField(
                     value = if (profile.reconnectSecs == 0) "" else profile.reconnectSecs.toString(),
                     onValueChange = {
@@ -1049,6 +1210,7 @@ private fun EnginePage(
                 checked = profile.noDataCheck,
                 enabled = editable,
                 onCheckedChange = { onProfileChange(profile.copy(noDataCheck = it)) },
+                aiTopic = AiTopic.NO_DATA_CHECK,
             )
             RowDivider(inset = false)
             SettingsSwitchRow(
@@ -1057,6 +1219,7 @@ private fun EnginePage(
                 checked = profile.noProfileRetry,
                 enabled = editable,
                 onCheckedChange = { onProfileChange(profile.copy(noProfileRetry = it)) },
+                aiTopic = AiTopic.NO_PROFILE_RETRY,
             )
             RowDivider(inset = false)
             SettingsChoiceRow(
@@ -1066,6 +1229,7 @@ private fun EnginePage(
                 label = { it.name },
                 onSelect = { onProfileChange(profile.copy(coreLogLevel = it)) },
                 enabled = editable,
+                aiTopic = AiTopic.CORE_LOG,
             )
         }
     }
@@ -1109,6 +1273,7 @@ private fun AppearancePage(onBack: () -> Unit, modifier: Modifier = Modifier) {
                             }
                         },
                         icon = if (language == AppLanguage.SYSTEM) Icons.Rounded.Language else null,
+                        aiTopic = if (language == AppLanguage.SYSTEM) AiTopic.LANGUAGE else null,
                     )
                 }
             }

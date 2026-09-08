@@ -1,6 +1,5 @@
 package studio.cluvex.aether.core
 
-import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -11,6 +10,7 @@ import java.util.Locale
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
+import studio.cluvex.aether.ai.AiRedaction
 
 enum class LogLevel { DEBUG, INFO, WARN, ERROR }
 
@@ -61,6 +61,24 @@ data class ComponentCheck(
  * memory-only log is wiped by that death, so the user "sees no log after a
  * crash". We therefore mirror every line to a file on disk as it is written and
  * reload it on next launch, so the crashing session is always inspectable.
+ *
+ * ENCRYPTED AT REST (audit 1.2.9-r3, F-2). That mirror used to be a plaintext
+ * file, and its contents are the endpoints the scan settled on, the exit IP, the
+ * WARP enrolment handle and the assigned IPv6 - the "who was this user talking to"
+ * set, kept across launches by design. It is now written through
+ * [EncryptedLogFile]: one AES-256-GCM record per flushed batch, under a
+ * non-exportable Android Keystore key, so appending still costs one write and a
+ * rooted or seized device yields ciphertext.
+ *
+ * Two consequences worth stating plainly:
+ *
+ *  * A file left by an older version is plaintext. It is loaded once (so the user
+ *    does not lose the log of the crash they are about to report), then SHREDDED,
+ *    and everything after that is sealed. The `.prev` rotation of a legacy file
+ *    goes with it.
+ *  * If the device keystore cannot give us a key, the disk mirror is switched OFF
+ *    and said so once, rather than falling back to plaintext. The panel still
+ *    shows the live in-memory log; only crash survival is lost.
  */
 object DiagnosticsLog {
     private const val MAX_LINES = 800
@@ -115,6 +133,14 @@ object DiagnosticsLog {
     @Volatile
     private var logFile: File? = null
 
+    /** Set when sealing failed: the disk mirror is off for this process. */
+    @Volatile
+    private var diskMirrorDisabled = false
+
+    /** True while the on-disk log is being kept (encrypted). For the UI/report. */
+    val persistedEncrypted: Boolean
+        get() = logFile != null && !diskMirrorDisabled
+
     /**
      * Wires the persistent log file (call once from Application.onCreate). If a
      * file from a previous run exists (e.g. it ended in a crash), its contents
@@ -124,10 +150,27 @@ object DiagnosticsLog {
     @Synchronized
     fun init(file: File) {
         logFile = file
+        var migrated = false
         runCatching {
             if (file.exists() && file.length() > 0L) {
-                val previous = file.readLines()
-                runCatching { file.copyTo(File(file.parentFile, file.name + ".prev"), overwrite = true) }
+                val previous: List<String>
+                if (EncryptedLogFile.looksSealed(file)) {
+                    previous = EncryptedLogFile.readLines(file)
+                    // Rotate the SEALED bytes, so the previous session survives a
+                    // trim or a clear without ever existing in the clear.
+                    runCatching {
+                        file.copyTo(File(file.parentFile, file.name + ".prev"), overwrite = true)
+                    }
+                } else {
+                    // A log written by 1.2.9-r2 or earlier: plaintext. Read it once
+                    // so the user does not lose the session they are about to
+                    // report, then remove it - along with its plaintext rotation -
+                    // and start a sealed file in its place.
+                    previous = runCatching { file.readLines() }.getOrDefault(emptyList())
+                    EncryptedLogFile.shred(file)
+                    EncryptedLogFile.shred(File(file.parentFile, file.name + ".prev"))
+                    migrated = true
+                }
                 val restored = previous.takeLast(MAX_LINES).map {
                     LogLine(0L, "prev", LogLevel.DEBUG, it, raw = true)
                 }
@@ -145,6 +188,9 @@ object DiagnosticsLog {
                     _lines.value = buffer.toList()
                 }
             }
+        }
+        if (migrated) {
+            i("log", "Previous diagnostics log was plaintext: it has been loaded, then erased. From now on the on-disk log is encrypted with a device key.")
         }
     }
 
@@ -198,8 +244,14 @@ object DiagnosticsLog {
                 batch.add(pendingWrites.take())
                 pendingWrites.drainTo(batch, 256)
                 val file = logFile ?: continue
+                if (diskMirrorDisabled) continue
+                // ONE sealed record per batch: the same single write the plaintext
+                // implementation did, so the burst behaviour is unchanged.
+                if (!EncryptedLogFile.appendChunk(file, batch.joinToString("\n"))) {
+                    disableDiskMirror(file)
+                    continue
+                }
                 runCatching {
-                    file.appendText(batch.joinToString("\n", postfix = "\n"))
                     if (file.length() > MAX_FILE_BYTES) trimFile(file)
                 }
             }
@@ -210,13 +262,38 @@ object DiagnosticsLog {
      * Keeps the on-disk log bounded: rotates to `<name>.prev` and restarts the
      * live file with the most recent lines, so crash-survivability is kept
      * without letting storage grow forever.
+     *
+     * Both files stay sealed: the rotation is a byte copy of ciphertext and the
+     * rewrite re-seals what it keeps.
      */
     private fun trimFile(file: File) {
         runCatching {
             file.copyTo(File(file.parentFile, file.name + ".prev"), overwrite = true)
-            val keep = file.readLines().takeLast(MAX_LINES / 2)
-            file.writeText(keep.joinToString("\n", postfix = "\n"))
+            val keep = EncryptedLogFile.readLines(file).takeLast(MAX_LINES / 2)
+            EncryptedLogFile.rewrite(file, keep)
         }
+    }
+
+    /**
+     * Turns the disk mirror off after a sealing failure and says so exactly once.
+     *
+     * Fail CLOSED: the alternative is writing the user's endpoint history to
+     * storage in the clear on a device whose keystore is already misbehaving. The
+     * live in-memory log - what the panel shows and what "copy logs" copies - is
+     * not affected.
+     */
+    private fun disableDiskMirror(file: File) {
+        if (diskMirrorDisabled) return
+        diskMirrorDisabled = true
+        // Anything already on disk was written by a working key; a file we can no
+        // longer append to is of no use, and leaving a half-written record behind
+        // would only confuse the next launch.
+        EncryptedLogFile.shred(file)
+        w(
+            "log",
+            "This device's keystore would not seal the diagnostics log, so the on-disk copy is OFF " +
+                "(the log is still kept in memory for this session). It will never be written in plaintext.",
+        )
     }
 
     fun d(tag: String, m: String) = log(tag, LogLevel.DEBUG, m)
@@ -237,7 +314,10 @@ object DiagnosticsLog {
                 if (f.exists() && f.length() > 0L) {
                     f.copyTo(File(f.parentFile, f.name + ".prev"), overwrite = true)
                 }
-                f.writeText("")
+                // Start a fresh SEALED file rather than truncating to an empty
+                // plaintext one, which would leave the next append writing into a
+                // file with no magic.
+                EncryptedLogFile.rewrite(f, emptyList())
             }
         }
     }
@@ -256,4 +336,21 @@ object DiagnosticsLog {
 
     fun exportText(): String =
         synchronized(bufferLock) { buffer.toList() }.joinToString("\n") { it.format() }
+
+    /**
+     * The log with every address, identifier and credential masked (audit
+     * 1.2.9-r3, §6).
+     *
+     * "Copy logs" hands over the raw log, which is right: it is a deliberate user
+     * action for a bug report, and a diagnosis needs the detail. But the redaction
+     * written to protect the user from the AI model protects them just as well from
+     * a public GitHub issue, and until now the safe option simply did not exist -
+     * so the only button copied the exit IP, the WARP handle and the endpoints into
+     * whatever thread the user pasted it in.
+     *
+     * Same rule set as the AI digest ([AiRedaction]), minus its 220-line cap:
+     * plumbing and error text stay, identity goes.
+     */
+    fun exportRedactedText(): String =
+        AiRedaction.redactAll(exportText())
 }

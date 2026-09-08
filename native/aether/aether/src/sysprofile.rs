@@ -72,6 +72,26 @@ pub struct Tuning {
     pub netstack_tcp_rx_buf: usize,
     pub netstack_udp_buf: usize,
     pub channel_capacity: usize,
+    /// Initial HTTP/2 STREAM window advertised to a MASQUE-over-H2 edge.
+    ///
+    /// Core 1.9.0. HTTP/2 flow control decides how much data the edge may have
+    /// in flight towards us before it has to stop and wait, so it puts a hard
+    /// ceiling of window / round-trip-time on a download. The h2 crate defaults
+    /// to the RFC minimum of 64 KiB, which caps a 130 ms path at ~500 KB/s
+    /// however fast the line underneath really is. QUIC and WireGuard never meet
+    /// this limit because their windows are megabytes wide; this is what puts the
+    /// HTTP/2 carrier on the same footing.
+    ///
+    /// NOTE (1.2.9): this is a CARRIER window, not a per-flow one. What a single
+    /// device flow may keep in flight end to end is still bounded by
+    /// [Tuning::netstack_tcp_rx_buf] above, which is the advertised window smoltcp
+    /// derives from that flow's receive buffer and which r4 deliberately sized to
+    /// a mobile bandwidth-delay product. Lifting the carrier ceiling therefore
+    /// cannot re-create the standing queue r4 removed: the inner window stays the
+    /// binding limit.
+    pub h2_stream_window: u32,
+    /// Initial HTTP/2 CONNECTION window for the same carrier (core 1.9.0).
+    pub h2_connection_window: u32,
 }
 
 static TUNING: OnceLock<Tuning> = OnceLock::new();
@@ -199,6 +219,20 @@ fn detect_tier(cpus: usize, mem_mb: Option<u64>) -> Tier {
     }
 }
 
+/// Reads a buffer size in bytes from the environment, ignoring anything
+/// outside what a TCP socket can sensibly be given.
+///
+/// Core 1.9.0. Kept as upstream wrote it: it only ever overrides the two
+/// netstack TCP figures, and the defaults it falls back to are this app's
+/// (see the r4/r6 sizing below), so an unset variable changes nothing.
+fn buffer_override(key: &str, fallback: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|bytes| (16 * 1024..=64 * 1024 * 1024).contains(bytes))
+        .unwrap_or(fallback)
+}
+
 fn build_tuning() -> Tuning {
     let cpus = detected_cpus();
     let mem_mb = total_mem_mb();
@@ -233,7 +267,35 @@ fn build_tuning() -> Tuning {
         Tier::Medium => (10usize, 2 * 1024 * 1024, 96 * 1024, 96 * 1024, 128 * 1024, 64 * 1024, 512usize),
         Tier::High => (usize::MAX, 7 * 1024 * 1024, 128 * 1024, 128 * 1024, 192 * 1024, 128 * 1024, 1024usize),
     };
+    //
+    // CORE 1.9.0 REBASE NOTE (1.2.9). Upstream 1.9.0 rewrote this same table on
+    // its own: it folded the UDP figure back into ONE 7 MB number for both
+    // directions and raised the netstack TCP buffers to 2 MB rx / 512 KB tx on
+    // this tier. Taking those numbers would revert the r6 root-cause fix (a 7 MB
+    // kernel send buffer is what silently disabled every throttle above it) and
+    // the r4 window bound (which is what stopped a single download building two
+    // seconds of standing queue). The engine upgrade was required to leave
+    // download speed and connect behaviour exactly as 1.2.8 tuned them, so the
+    // app figures stay and only upstream's new MECHANISMS are adopted: the
+    // environment overrides just below and the HTTP/2 windows further down.
     // <<< AETHER-APP-PATCH netstack-buffer-sizing
+
+    // Core 1.9.0: the two netstack TCP figures can be overridden per device
+    // without a rebuild. The fallbacks are the app values above.
+    let netstack_tcp_rx_buf = buffer_override("AETHER_NETSTACK_TCP_RX", netstack_tcp_rx_buf);
+    let netstack_tcp_tx_buf = buffer_override("AETHER_NETSTACK_TCP_TX", netstack_tcp_tx_buf);
+
+    // How much unacknowledged data an HTTP/2 MASQUE edge may have on its way to
+    // us. It is a promise rather than a reservation, but it does bound how much
+    // arrives before we have drained it, so it follows the tier like the rest.
+    // Upstream 1.9.0's figures, taken unchanged: 1.2.8 had no such knob at all
+    // (the h2 crate's 64 KiB default was the ceiling) and the per-flow window
+    // above still governs what any one connection can keep in flight.
+    let (h2_stream_window, h2_connection_window) = match tier {
+        Tier::Low => (2 * 1024 * 1024, 4 * 1024 * 1024),
+        Tier::Medium => (8 * 1024 * 1024, 16 * 1024 * 1024),
+        Tier::High => (16 * 1024 * 1024, 32 * 1024 * 1024),
+    };
 
     Tuning {
         tier,
@@ -246,6 +308,8 @@ fn build_tuning() -> Tuning {
         netstack_tcp_rx_buf,
         netstack_udp_buf,
         channel_capacity,
+        h2_stream_window,
+        h2_connection_window,
     }
 }
 
@@ -271,7 +335,7 @@ pub fn log_summary() {
     // r4 - in either case nothing diagnosed since is being tested. That is
     // precisely how the r4 round was lost. Do not reword it casually.
     log::info!(
-        "[*] performance profile: {:?} (cpus={} mem={}); scan concurrency cap={}, udp socket rcv/snd={}KB/{}KB (snd = uplink queue budget), netstack tcp tx/rx={}KB/{}KB (rx = advertised window), netstack udp={}KB, channel capacity={}",
+        "[*] performance profile: {:?} (cpus={} mem={}); scan concurrency cap={}, udp socket rcv/snd={}KB/{}KB (snd = uplink queue budget), netstack tcp tx/rx={}KB/{}KB (rx = advertised window), netstack udp={}KB, channel capacity={}, h2 windows stream/conn={}KB/{}KB",
         t.tier,
         t.cpus,
         mem,
@@ -282,6 +346,8 @@ pub fn log_summary() {
         t.netstack_tcp_rx_buf / 1024,
         t.netstack_udp_buf / 1024,
         t.channel_capacity,
+        t.h2_stream_window / 1024,
+        t.h2_connection_window / 1024,
     );
     // <<< AETHER-APP-PATCH netstack-buffer-sizing
 }
@@ -321,4 +387,14 @@ pub fn netstack_udp_buf_bytes() -> usize {
 
 pub fn channel_capacity() -> usize {
     tuning().channel_capacity
+}
+
+/// Core 1.9.0: the stream window `masque_h2::h2_builder()` advertises.
+pub fn h2_stream_window_bytes() -> u32 {
+    tuning().h2_stream_window
+}
+
+/// Core 1.9.0: the connection window `masque_h2::h2_builder()` advertises.
+pub fn h2_connection_window_bytes() -> u32 {
+    tuning().h2_connection_window
 }

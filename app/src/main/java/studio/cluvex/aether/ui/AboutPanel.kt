@@ -23,6 +23,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,10 +35,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import studio.cluvex.aether.BuildConfig
 import studio.cluvex.aether.R
+import studio.cluvex.aether.core.SignerIdentity
 
 private const val URL_ORIGINAL_GITHUB = "https://github.com/CluvexStudio/Aether"
 private const val URL_ORIGINAL_TELEGRAM = "https://t.me/CluvexStudio"
@@ -91,6 +96,23 @@ fun AboutPanel(modifier: Modifier = Modifier, startExpanded: Boolean = false) {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
         }.getOrNull() ?: "1.1.0"
+    }
+
+    // 1.2.9-r3: BUILD AUTHENTICITY, in the one place a user looks for "what am I
+    // running". The release signing key is committed to this repository (audit
+    // F-1) and cannot be rotated without breaking in-place updates for everyone,
+    // so the mitigation is to make the identity of a build checkable: the
+    // certificate that actually signed this APK, compared against the one the
+    // project publishes, plus the APK's own hash to compare with the release page.
+    val signerFingerprint = remember { SignerIdentity.fingerprint(context) }
+    val signerStatus = remember { SignerIdentity.status(context) }
+    // The APK hash means reading 20-70 MB off flash, so it is loaded only when the
+    // card is actually opened, on the IO dispatcher, once per process.
+    var apkHash by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(expanded) {
+        if (expanded && apkHash == null) {
+            apkHash = withContext(Dispatchers.IO) { SignerIdentity.apkSha256(context) }
+        }
     }
 
     Card(
@@ -176,6 +198,52 @@ fun AboutPanel(modifier: Modifier = Modifier, startExpanded: Boolean = false) {
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
                         },
+                    )
+
+                    // ---- Build authenticity -------------------------------
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = stringResource(
+                            R.string.about_signer,
+                            SignerIdentity.short(signerFingerprint),
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = stringResource(
+                            when (signerStatus) {
+                                SignerIdentity.Status.MATCHES -> R.string.about_signer_ok
+                                SignerIdentity.Status.MISMATCH -> R.string.about_signer_bad
+                                SignerIdentity.Status.UNPINNED -> R.string.about_signer_unpinned
+                                SignerIdentity.Status.UNKNOWN -> R.string.about_signer_unknown
+                            },
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = if (signerStatus == SignerIdentity.Status.MISMATCH) {
+                            FontWeight.SemiBold
+                        } else {
+                            FontWeight.Normal
+                        },
+                        color = when (signerStatus) {
+                            SignerIdentity.Status.MATCHES -> MaterialTheme.colorScheme.primary
+                            SignerIdentity.Status.MISMATCH -> MaterialTheme.colorScheme.error
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                    Text(
+                        text = stringResource(
+                            R.string.about_apk_hash,
+                            apkHash ?: stringResource(R.string.about_apk_hash_loading),
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = stringResource(R.string.about_verify_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
 
                     Spacer(Modifier.height(16.dp))
