@@ -1,5 +1,281 @@
 # Changelog
 
+## 1.3.0 — Tor in four modes, engine core 2.0.0
+
+App 1.3.0 / versionCode 14, signed with the same certificate, so it installs over
+1.2.9 without uninstalling.
+
+**Engine (core 1.9.0 -> 2.0.0)**
+
+- All ten app engine patches rebased onto the new upstream sources
+  (`Cargo.toml`, `lib.rs`, `netstack.rs`, `quic.rs`, `upstream.rs`, `wireguard.rs`,
+  `masque.rs`, `masque_h2.rs`, `socks.rs`, `build.rs`); 21 merge conflicts resolved
+  by hand rather than by preferring one side.
+- `netstack.rs` was NOT merged textually. Thirteen upstream behavioural changes
+  were ported into the app's own file and marked `AETHER-CORE-PORT 2.0.0`: a real
+  connect deadline with env override, keepalive/dead-peer tuning, `ORPHAN_LINGER`
+  plus `orphaned_at`/`aborted` state, `CloseWait` treated as connected, `SetAddrs`
+  merging one address family without wiping the other, and a UDP socket leak when
+  the app-side channel closes. The app's own data-plane work from 1.2.8 (CUBIC,
+  bounded uplink buffer, BDP receive window, split datagram sizing, pinned smoltcp
+  0.12) was kept in full.
+- Three upstream core tests were adapted into the app's suite.
+- `.upstream-baseline` refreshed to 2.0.0 for all ten files;
+  `scripts/sync-core.sh` baseline moved 1.8.0 -> 2.0.0.
+- New protocol exposed: `MIM` (`--mim`), MASQUE inside MASQUE.
+
+**Tor (new)**
+
+- `TransportBackend` grew from two modes to six: `TOR`, `AETHER_TOR`,
+  `TOR_PSIPHON` and `TOR_AETHER` alongside `AETHER` and `AETHER_PSIPHON`, with a
+  `TorMode` (`CHAIN` / `ONLY` / `REVERSE`) derived from the backend rather than
+  stored separately.
+- `TOR_AETHER` is `--tor-reverse`: Tor outermost, the tunnel inside it, WARP exit,
+  and a local network that cannot see that a tunnel exists. It needs no Tor front
+  (the device's traffic travels inside WARP, which carries UDP natively), so
+  `needsTorFront` excludes it explicitly - treating it like a Tor exit would have
+  broken DNS in the one Tor mode where DNS was never the problem.
+- New `ConnectionProfile.effectiveProtocol`: the reverse chain is forced to MASQUE
+  and `AETHER_MASQUE_HTTP2` is forced with it, because core 2.0.0 refuses `--wg`
+  and `--gool` there (Tor is TCP-only; WARP's WireGuard endpoints are UDP-only).
+  Sending the user's WireGuard selection anyway would kill the engine at startup -
+  which from the app's side is indistinguishable from a blocked network. The UI
+  disables the protocol selector in that mode and states the reason.
+- The reverse chain gets a single connect candidate on MASQUE/h2 with the Tor
+  bootstrap budget instead of the Smart Auto ladder: rungs that try `--wg` or
+  `--gool` would fail instantly and burn the time Tor needs to bootstrap.
+- New `transport/TorSocksWire.kt`: the SOCKS5 UDP and DNS-over-TCP framing lifted
+  out of `TorSocksFront`'s receive loop into a pure, total object, covered by
+  `TorSocksWireTest` (17 cases). Every bug this file can contain looks like
+  something else from the outside - a port read one byte off answers a QUIC attempt
+  with a DNS reply, or drops every name lookup on the device, and both present as
+  "connected, nothing loads", which is exactly how the 1.2.7 Tor backend failed.
+  Two hardening fixes came with the move: the declared datagram length is now
+  checked against the buffer size, and the IPv4/IPv6 address bounds are checked
+  against the declared length rather than the array.
+- `TorSocksFront` counts malformed datagrams and reports them in `dropSummary()`.
+  A flood of unparseable packets was previously indistinguishable from silence.
+- Three engine Tor settings the app could not reach are now in the UI, under
+  **Settings -> Tor**: bridge country (`AETHER_TOR_COUNTRY`), bootstrap patience
+  (`AETHER_TOR_DIRECT_SECS`) and the reachability check (`AETHER_TOR_CHECK`). All
+  three are sent only when Tor actually runs and only when the user deviates from
+  the engine's default, so the engine keeps owning its own defaults. The first two
+  are hidden in `Aether -> Tor`, where bridgedb is never consulted.
+- `AETHER_TOR_LOG` follows the existing core log level: `debug` when the app is set
+  to DEBUG, otherwise left to the engine. The engine's Tor log understands only
+  info/debug/trace, so the app's quieter levels have no counterpart to send.
+- SECURITY AUDIT 1.3.0, score 88/100 - full report in
+  `docs/SECURITY_AUDIT_1.3.0.md`, summary table in both READMEs and in the release
+  notes, EN + FA. Nine areas (the seven of the brief plus on-device exposure and
+  supply chain). App signing and update compatibility are OUT OF SCOPE by product
+  decision - 1.3.0 keeps the 1.2.9 signing identity so it installs over an existing
+  install - which is why 88 is not comparable with the 79 of the 1.2.9 report.
+  Findings, in severity order: the kill-switch lockdown TUN routes `::/0` only when
+  `ipv6LeakProtection` is on (`AetherVpnService.ensureLockdownTun`), `killSwitch`
+  defaults to false, no `FLAG_SECURE` anywhere, clipboard copies of the API key and
+  the LAN password are not marked `EXTRA_IS_SENSITIVE`, two of three `NetProbe` geo
+  providers are cleartext on a raw socket, R8 is off, CI has no dependency or secret
+  scanning and pins actions by tag, and the Psiphon AAR ships as a committed binary
+  with a recorded hash but no upstream provenance. Verified clean: no hardcoded
+  secret, AES-256-GCM only under a non-exportable keystore key, no custom
+  `TrustManager` / permissive verifier anywhere and system-only trust anchors (no
+  MitM path), hostnames never resolved locally, DNS over TCP inside Tor, non-DNS UDP
+  dropped, `::/0` unconditional in chained modes, log and engine identity encrypted
+  at rest with fail-closed behaviour, five permissions, immutable `PendingIntent`s,
+  no WebView, three `Log` calls in the whole app.
+- SECURITY REMEDIATION, same build, seven of the ten findings fixed after the audit:
+  score 93/100 recomputed on the same nine weighted areas (88 as audited stays in
+  the report - the findings section deliberately still describes the code that was
+  reviewed, and the new section 6 records what changed).
+  * F-1: `ensureLockdownTun` claims the v6 address and routes `::/0` UNCONDITIONALLY.
+    A blackhole has no connectivity to break, so gating it on `ipv6LeakProtection`
+    only ever left a v6 path open in the window the kill switch exists for.
+  * F-2: `killSwitch` defaults to TRUE, in `ConnectionProfile` and in the
+    `ProfileStore` fallback (both were needed - the store's `?: false` would have
+    kept the old behaviour for every fresh install). A user's explicit "off" is
+    written to disk and survives; the new default only applies where the key was
+    never written.
+  * F-3: new `ui/components/PrivacyGuard.kt`. `SecureSurface()` holds `FLAG_SECURE`
+    while a secret-bearing surface is composed, REF-COUNTED so overlapping surfaces
+    cannot strip protection from a screen that is still showing. Wired into the LAN
+    credential rows (`SharePanel`), the open log console (`DiagnosticsPanel`), the
+    Gemini key page (`AiPages`), the Access token block (`SettingsScreen`), and set
+    directly on the window in `CrashReportActivity`.
+  * F-4: `copySensitive()` sets `ClipDescription.EXTRA_IS_SENSITIVE` (the literal key
+    below API 33) for the proxy credential, the verbatim diagnostics log and the
+    crash dump. The redacted log export and the `127.0.0.1:<port>` rows stay plain
+    copies on purpose. Correction to the audit text: there is no copy button for the
+    API key at all - `AiPages` only PASTES from the clipboard.
+  * F-5: `NetProbe.GEO_PROVIDERS` is TLS-only. `ip-api.com:80` is gone as an IP
+    source and `1.1.1.1` moved to 443. The IP literal is kept deliberately so no DNS
+    is in the probe path; the certificate carries `1.1.1.1` as an iPAddress SAN and
+    `tlsWrap` verifies it. Country refinement is still ip-api over HTTP and is still
+    informational only.
+  * F-7: non-blocking `cargo audit` step in CI (placed after the engine build, since
+    the Rust tree does not exist before `fetch-natives.sh`) plus new
+    `.github/dependabot.yml`: **one** entry (gradle), monthly, all bumps grouped into
+    a single PR. Cargo and github-actions were dropped from it on purpose — the
+    engine tree is re-synced from upstream by `sync-core.sh` on every run, so a PR
+    against it cannot survive, and action versions are reviewed by hand together
+    with the still-open F-9. No Gradle CVE scanner: the OWASP plugin now needs an
+    NVD API key, and downloading a scanner binary without a verifiable checksum
+    would be its own supply-chain hole.
+  * CI hygiene, from the first push of this config: the Build APK workflow now has a
+    `concurrency` group, so a newer push to a branch cancels the older run instead
+    of letting two builds sign, push back and publish to the same tag (a tag build
+    is never cancelled), and the job is skipped for dependency commits — merging a
+    Dependabot PR no longer publishes a release. Build one deliberately with
+    Actions → Build APK → "Run workflow".
+  * F-8: new `app/libs/PROVENANCE.md` - size, SHA-256, upstream project, and an
+    explicit statement of what that hash does NOT prove.
+  * STILL OPEN, deliberately: F-6 (R8 off - a reflection break in Compose or the
+    Psiphon AAR shows up on a device, not in a unit test) and F-9 (actions still
+    pinned by tag; the commit SHAs could not be looked up without network access and
+    are not something to invent).
+  * All of this is SOURCE-LEVEL. It compiles, 67 unit tests pass, `versionCode`/
+    `versionName` unchanged - but no one has yet confirmed on a phone that the
+    recents thumbnail is blank, that the clipboard preview hides the LAN password on
+    Android 13+, or that `1.1.1.1:443` verifies on every OEM TLS stack.
+- DOCS: the 1.3.0 section of `README.md`, `README.fa.md` and
+  `.github/release-notes.md` now lists NEW FEATURES ONLY. The bug-fix and
+  device-test sections were removed from all three - that record lives here, in this
+  file, which is where an engineering log belongs. Nothing else in the version
+  history was touched.
+- DOCS RTL, second attempt (the first did not hold): the Persian 1.3.0 sections in
+  `README.fa.md` and `.github/release-notes.md` are now EXPLICIT per-element HTML -
+  `<h2 dir="rtl" align="right">`, `<p dir="rtl" align="right">`, `<ul>`, `<table>`
+  with `align="right"` on every cell. The wrapper-plus-RLM approach of the previous
+  build was overridden by the `dir="auto"` GitHub emits on every block it generates
+  from markdown; an element carrying its own `dir`/`align` cannot be overridden.
+  Cost of the method: markdown syntax is not processed inside those blocks, so the
+  emphasis, code spans and links there are real HTML tags. Verified by rendering the
+  file through pandoc + WeasyPrint and looking at the result.
+- DOCS: `SOURCE_MANIFEST.sha256` regenerated. It still carried the 1.2.9 hashes and
+  had never been refreshed for 1.3.0; 76 of its 4,189 entries were stale, including
+  the whole engine 2.0.0 sync and every app file this release touched.
+- TOR CONNECT FIX (second device test, root cause in the field log): every
+  tor-fronted stage 1 (`Tor`, `Tor -> Psiphon`, `Tor -> Aether`) failed 4.4 s into
+  the connect on a network that was NOT blocking Tor. The engine binds its SOCKS5
+  listener at launch, so `PortProbe.awaitOpen` returned after 300 ms without
+  spending any of the 300 s bootstrap budget computed for the attempt, and
+  `Diagnostics.runProxyStage` then ran ONE `NetProbe.checkSocksHandshake` with a
+  fixed 4000 ms timeout. The log shows the verdict "does not speak SOCKS5" at
+  +4013 ms while the same log has Tor at 30 %, with all 7 directory authority
+  certificates fetched. Four changes:
+  - New `core/TorBootstrap.kt` parses the engine's own
+    `tor reaching the network: NN%` line into a `StateFlow` with a monotonic,
+    injectable clock; any percentage CHANGE counts as movement, including downwards,
+    because a bridge retry restarts the bootstrap from a low percentage.
+    `AetherProcess` resets it per engine start and feeds it from the log drain.
+  - `Diagnostics.runProxyStage` gained `handshakeGraceMs`, `alive` and `abort`, and
+    `awaitSocksHandshake` retries every 1.5 s until the deadline instead of failing
+    on the first attempt. `handshakeGraceMs = 0` keeps the old single-shot gate for
+    every non-Tor stage, where an open port really does mean ready.
+  - `AetherVpnService.connectAttempt` passes the REMAINING attempt budget as the
+    handshake grace for `TorMode.ONLY` / `REVERSE`, and aborts early when
+    `TorBootstrap.stalled()` reports no movement for 45 s (bridges off) or 420 s
+    (bridges permitted). `torBudget()` raises the per-attempt budget to 600 s when
+    bridges are permitted, because the engine's own bridge fallback starts at
+    `AETHER_TOR_BRIDGE_SECS` = 360 s and the previous 300 s cut-off made it
+    unreachable in every case.
+  - `err_selftest` is no longer the message for a Tor that never reached the
+    network: `err_tor_blocked` (with the percentage it stopped at),
+    `err_tor_no_progress` and `err_tor_no_stream` name the actual cause, and
+    `state_tor_bootstrap_pct` / `state_tor_bridges` show progress in the
+    notification. EN + FA.
+  - `TorBootstrapTest` (15 tests) covers the parser against verbatim field-log
+    lines, the downward-movement rule, the stall detector and the silent-engine case.
+- DOCS FIX (device test): `README.fa.md` closed its `<div dir="rtl">` after the
+  1.2.5 section and carried an orphan `</div>` 380 lines later, so most of the
+  Persian README rendered left-aligned. The wrapper now spans the whole Persian
+  body; every RTL wrapper also carries `align="right"` and every block inside one
+  starts with U+200F, so the direction holds whether GitHub honours the wrapper's
+  `dir` or applies `dir="auto"` per block. The Persian release notes gained the
+  "fixed in this build" section that existed only in English.
+- CRASH FIX (device test): `AetherVpnService.onStartCommand` now calls
+  `startForeground` for EVERY action, before anything else. Only the connect branch
+  did, while `AetherController.disconnect()`, the notification action, the tile and
+  the widget all arrive through `startForegroundService()` - which Android answers
+  with `ForegroundServiceDidNotStartInTimeException` ten seconds later. Every
+  disconnect was a guaranteed process kill, and the field log shows it happening
+  with the tunnel still up. The strict-kill-switch path needed it doubly: it keeps
+  the service alive on purpose.
+- The crash handler in `AetherApp` now treats that one framework exception as
+  survivable - it posts the missing notification through
+  `AetherVpnService.rescueForeground()` and keeps the session - and, for every
+  other fatal exception, stops the engine child process on the way out so a dying
+  app cannot leave `libaether.so` running.
+- CANCELLATION FIX: the self-test and the chained stage gate used `runCatching`,
+  which swallows `CancellationException` too, so a disconnect during verification
+  was reported as a failed self-test. The ladder then started the NEXT engine on an
+  already-cancelled job, and nothing was left to supervise or stop it - the log of
+  such a session ends mid-attempt with a live engine still bootstrapping Tor. The
+  probes now use `probeOrFalse`, which re-throws cancellation, and `runLadder`
+  calls `ensureActive()` before each rung.
+- `SegmentedSelector` wraps into an even grid above three options instead of
+  squeezing every option into one row. `MASQUE×2` made the protocol row five wide,
+  which is narrower than the word "WireGuard": the label broke across two lines
+  while its neighbours did not. Five options are now 3 + 2, the short row is padded
+  with a weighted spacer so cell widths stay uniform, and labels are single-line.
+- `ui/components/LtrOutlinedTextField` gained an `isError` parameter. The Tor
+  reachability field needs it: the engine parses `host:port` with a fallback to 443
+  on a bad port, so a typo silently becomes a different target - in the one setting
+  whose job is telling a working Tor from a broken one.
+- `.github/removed-sources.txt` no longer lists `transport/TorSocksFront.kt`, which
+  1.3.0 legitimately brings back, and `scripts/purge-stale-sources.sh` now refuses
+  to delete a listed Kotlin file that the current sources still reference. Without
+  both, CI deleted the new file, pushed the deletion to the branch and failed the
+  compile with `Unresolved reference 'TorSocksFront'`.
+- New `transport/TorCountries.kt` rather than reusing `ExitRegions`: a bridge
+  country is where the user IS, an exit region is where the user wants to come out,
+  and Psiphon's egress list contains none of IR, CN, TM or BY.
+  `fromStoredName` maps the names retired in 1.2.7 so an old profile cannot
+  silently resolve to a different provider.
+- New `transport/TorSocksFront.kt`: a local SOCKS5 front on port 1821 that answers
+  `UDP ASSOCIATE` itself, resolves DNS over TCP inside Tor with RFC 1035
+  length-prefix framing, relays `CONNECT` with the hostname unresolved (so `.onion`
+  works and no name is looked up locally) and drops other UDP with counters.
+  Without it a Tor session establishes and carries nothing — the 1.2.7 failure.
+- New ports in `TunnelConfig`: `TOR_SOCKS_PORT` 1820 (the engine's Tor listener
+  with `--tor`) and `TOR_FRONT_PORT` 1821.
+- `AetherVpnService.connectTor()` drives both Tor-exit modes, with a five-minute
+  bootstrap budget instead of the endpoint-scan budget, and the front's lifecycle
+  tied into both teardown paths ahead of the engine.
+- Chained stage 1 no longer forces `TransportBackend.AETHER`, which would have
+  stripped `--tor` from the engine's argv and produced a session with no Tor in it.
+- `--tor-only` skips the Smart Auto ladder: with no tunnel there is no endpoint to
+  scan and every rung would be the same invocation.
+- Profile: `torBridges` (`AUTO`/`ALWAYS`/`OFF`) and `torBridgeLines`, validated
+  against a transport allow-list and capped at 12 lines, persisted in
+  `ProfileStore`.
+- `AetherProcess` exports `AETHER_TOR_DIR` (persistent directory cache) and
+  `AETHER_TOR_PT`/`AETHER_TOR_PT_DIR` pointing at `libpt-lyrebird.so` in
+  `nativeLibraryDir`, the only place on Android a spawned binary may live.
+- Psiphon's upstream port now follows the backend, so `Tor -> Psiphon` cannot dial
+  out through the wrong hop.
+
+**UI / AI**
+
+- A Tor settings group appears only in the modes that contain Tor; the bridge rows
+  are disabled with a reason in `Aether -> Tor`, where bridges do nothing.
+- The exit-country row explains that Tor picks its own exit per circuit.
+- Three AI topics (`BACKEND` rewritten, `TOR_BRIDGES`, `TOR_BRIDGE_LINES`); the AI
+  prompt snapshot now includes read-only context (backend, proxy mode, split mode,
+  upstream proxy, Tor settings), so advice can no longer ignore the actual pipeline.
+  Tor settings are readable by the assistant and not writable.
+- 18 new strings in `values/strings.xml` and `values-fa/strings.xml` (both files at
+  the same count).
+
+**Build**
+
+- `scripts/build-natives.sh` builds the engine with `--features tor` (core 2.0.0
+  keeps Tor behind an opt-in feature; without it the Tor arguments do not exist)
+  and then greps the stripped binary for `--tor-bind` to prove the feature took.
+- New `pt` target builds lyrebird as a PIE named `libpt-lyrebird.so` per ABI; a
+  missing Go toolchain is a warning, not an error.
+- CI gained a lyrebird step with `continue-on-error: true` — bridges must not be
+  able to hold back a release in which everything else works.
+
 ## 1.2.9-r3 — security remediation + the connected mark
 
 Version unchanged (1.2.9 / versionCode 13) and signed with the same certificate,

@@ -124,8 +124,8 @@ android {
         applicationId = "studio.cluvex.aether"
         minSdk = 26
         targetSdk = 35
-        versionCode = 13
-        versionName = "1.2.9"
+        versionCode = 14
+        versionName = "1.3.0"
 
         ndk {
             // We ship arm64 (primary) and arm builds.
@@ -152,8 +152,8 @@ android {
         // ------------------------------------------------------------------
         // 1.2.8-r5 BUILD IDENTITY.
         //
-        // 1.2.9 ships as versionName "1.2.9" / versionCode 13, and PATCHLEVEL is
-        // "1.2.9" with it. The field stays, because it is what identifies a build
+        // 1.3.0 ships as versionName "1.3.0" / versionCode 14, and PATCHLEVEL is
+        // "1.3.0" with it. The field stays, because it is what identifies a build
         // beyond its version name: r2,
         // r3 and r4 were all "1.2.8 (12)", the engine banner printed only the
         // upstream core version (1.8.0) which is identical in all of them, and

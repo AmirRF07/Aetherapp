@@ -74,7 +74,7 @@ object AiPatch {
      * text is written to be read by one.
      */
     val WRITABLE: Map<String, String> = linkedMapOf(
-        "protocol" to "AUTO | MASQUE | WIREGUARD | GOOL",
+        "protocol" to "AUTO | MASQUE | WIREGUARD | GOOL | MIM (MASQUE inside MASQUE)",
         "scanMode" to "TURBO | BALANCED | THOROUGH | STEALTH | IRONCLAD",
         "ipVersion" to "V4 | V6 | BOTH",
         "noize" to "OFF | LIGHT | FIREWALL | BALANCED | GFW | AGGRESSIVE (anti-DPI obfuscation strength)",
@@ -197,9 +197,26 @@ object AiPatch {
             else -> null
         }
 
+    /**
+     * Keys the model is TOLD about but may not change.
+     *
+     * Without this the snapshot contained writable keys only, so the model gave
+     * advice about a tunnel whose actual shape it could not see - it did not know
+     * whether Psiphon or Tor was in the path, and "switch to WARP*2 for speed" is
+     * wrong advice in a Tor mode, where no WARP tunnel exists at all.
+     */
+    private val READ_ONLY: List<String> = listOf(
+        "backend",
+        "proxyMode",
+        "splitMode",
+        "upstreamProxy",
+        "torBridges",
+        "torBridgeLines",
+    )
+
     /** The current value of every AI-visible key, as the prompt's context block. */
     fun snapshot(profile: ConnectionProfile): String = buildString {
-        WRITABLE.keys.forEach { key ->
+        (WRITABLE.keys + READ_ONLY).forEach { key ->
             append(key).append(" = ").append(read(profile, key)).append('\n')
         }
     }
@@ -238,6 +255,19 @@ object AiPatch {
         // Read-only context: the model is told about these so its advice makes
         // sense, and cannot write them (they are absent from WRITABLE).
         "backend" -> profile.backend.pipelineLabel
+        // Tor is read-only context, deliberately, and the reason is not the usual
+        // "an attacker could redirect the tunnel" one. `torBridges` and
+        // `torBridgeLines` are how a user on a censored network gets Tor to work at
+        // all; a model that turns bridges off - because the throughput advice it
+        // was asked for is technically correct - takes away the only thing keeping
+        // that user connected, and it would happen while they are reading about
+        // something else. Whether to use bridges stays a human decision.
+        "torBridges" -> profile.torBridges.name
+        "torBridgeLines" -> if (profile.torBridgeLines.isBlank()) {
+            "(none - the engine fetches bridges itself)"
+        } else {
+            "(${profile.sanitizedBridges().size} own bridge line(s))"
+        }
         "proxyMode" -> profile.proxyMode.toString()
         "splitMode" -> profile.splitMode.name
         "upstreamProxy" -> if (profile.upstreamProxy.isBlank()) "(none)" else "(set)"

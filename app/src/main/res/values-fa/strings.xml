@@ -477,4 +477,45 @@
     <string name="ai_chat_delete_title">%1$d پیام حذف شود؟</string>
     <string name="ai_chat_delete_body">این کار قابل بازگشت نیست. پیام‌های حذف‌شده دیگر به‌عنوان زمینهٔ گفت‌وگو برای دستیار فرستاده نمی‌شوند.</string>
     <string name="ai_chat_delete_confirm">حذف</string>
+
+    <!-- Tor (1.3.0, engine core 2.0.0) -->
+    <string name="protocol_mim">MASQUE×2</string>
+    <string name="state_tor_bootstrap">در حال ساخت مدارهای تور…</string>
+    <string name="state_tor_bootstrap_pct">در حال رسیدن به شبکهٔ تور… %1$d%%</string>
+    <string name="state_tor_bridges">تور بلاک شده است — تلاش با پل‌ها…</string>
+    <string name="err_tor_blocked">تور در %1$d%% متوقف شد و نتوانست به شبکهٔ تور برسد. این همان چیزی است که یک شبکهٔ فیلترکنندهٔ تور تولید می‌کند. در تنظیمات → تور پل‌ها را روشن کنید، یا از حالت اتر → تور استفاده کنید: در آن حالت تور از داخل تونل برقرار می‌شود و اپراتور نه آن را می‌بیند و نه می‌تواند بلاکش کند.</string>
+    <string name="err_tor_no_progress">موتور اجرا شد اما تور هیچ پیشرفتی به‌سوی شبکهٔ تور گزارش نکرد. از برقرار بودن اینترنت مطمئن شوید و سپس حالت اتر → تور را امتحان کنید که تور را داخل تونل می‌سازد.</string>
+    <string name="err_tor_no_stream">تور به شبکه رسید اما هیچ اتصالی از داخل آن باز نشد. دوباره تلاش کنید — و اگر تکرار شد از حالت اتر → تور استفاده کنید.</string>
+    <string name="err_tor_bootstrap">تور نتوانست به‌موقع به شبکهٔ تور برسد. در شبکه‌ای که تور را بلاک می‌کند، از حالت اتر → تور استفاده کنید: اتصال در این حالت داخل تونل ساخته می‌شود و قابل بلاک شدن نیست.</string>
+    <string name="backend_help_tor">تور به تنهایی، بدون تونل اتر. خروجی شما یک گره خروجی تور است و ترافیک از سه رله می‌گذرد: کندترین و خصوصی‌ترین حالت. اینجا تور باید خودش به شبکهٔ تور برسد، پس اگر بلاک باشد از پل استفاده می‌کند.</string>
+    <string name="backend_help_aether_tor">دو هاپ: اول اتر وصل می‌شود، بعد تور داخل همان تونل ساخته می‌شود. شبکه‌ای که در آن هستید فقط ترانسپورت مخفی‌شدهٔ اتر را می‌بیند، هرگز تور را — پس هر جا تور بلاک است، این حالت را انتخاب کنید. خروجی شما گره خروجی تور است.</string>
+    <string name="backend_help_tor_psiphon">سه هاپ: اول تور، بعد سایفون از داخل آن. آی‌پی خروجی شما مال سایفون است که از یک آدرس تور به آن رسیده‌اید؛ پس سایت‌هایی که گره‌های خروجی تور را بلاک می‌کنند باز می‌شوند و آدرس خود شما پشت تور می‌ماند. کندترین حالت.</string>
+    <string name="exit_help_tor">تور خودش گره خروجی را انتخاب می‌کند، و برای هر مدار یکی تازه. هیچ تنطیمی آن را به یک کشور محدود نمی‌کند.</string>
+    <string name="section_tor">تور</string>
+    <string name="tor_bridges_title">پل‌ها</string>
+    <string name="tor_bridges_desc">وقتی تور بلاک است، چگونه به شبکه برسد.</string>
+    <string name="tor_bridges_not_needed">در این حالت لازم نیست: تور از داخل تونل اتر وصل می‌شود، پس شبکه‌ای که در آن هستید هرگز آن را نمی‌بیند.</string>
+    <string name="tor_bridges_auto">خودکار</string>
+    <string name="tor_bridges_always">همیشه</string>
+    <string name="tor_bridges_off">خاموش</string>
+    <string name="tor_bridge_lines_title">خطوط پل خودتان</string>
+    <string name="tor_bridge_lines_hint">obfs4 192.0.2.55:38114 &lt;FINGERPRINT&gt; cert=… iat-mode=0</string>
+    <string name="tor_bridge_lines_desc">هر خط یکی، در قالبی که bridges.torproject.org می‌دهد. خالی بگذارید تا برنامه پل‌های مناسب کشور شما را خودش بگیرد. خطی که نام ترانسپورتی را بگوید که برنامه ندارد، نادیده گرفته می‌شود.</string>
+    <string name="tor_group_footer">تور فقط TCP را حمل می‌کند — در هر برنامه و روی هر پلتفرم. اتر DNS را روی TCP داخل تور پاسخ می‌دهد و بقیهٔ UDP را دور می‌ریزد، پس برنامه‌هایی که QUIC دارند به TCP برمی‌گردند. این طبیعی است و چیزی لیک نمی‌شود: UDP دورریخته به هیچ‌جا نمی‌رود، چه برسد به دور زدن تور. منتطر تاخیر محسوساً بیشتر باشید، و اینکه اولین اتصال طول بکشد — تور قبل از ساخت مدار، دایرکتوری خود را دانلود می‌کند.</string>
+
+    <!-- Tor reverse chain (1.3.0) -->
+    <string name="backend_help_tor_aether">زنجیرهٔ معکوس: اول تور، بعد تونل اتر داخل آن ساخته می‌شود. خروجی شما یک آدرس WARP است — همان چیزی که اتر ساده می‌دهد — اما شبکه‌ای که در آن هستید فقط تور را می‌بیند و اصلاً نمی‌تواند بفهمد که تونل VPN‌ی وجود دارد. جایی به کار بیاید که خود Cloudflare/WARP بلاک یا کند شده اما تور هنوز رد می‌شود. برخلاف حالت‌های با خروجی تور، UDP عادی را حمل می‌کند.</string>
+    <string name="protocol_forced_reverse">در این حالت روی MASQUE بر HTTP/2 قفل است. تور فقط TCP را حمل می‌کند و اندپوینت‌های WireGuard مربوط به WARP فقط روی UDP پاسخ می‌دهند، پس موتور اینجا WireGuard و WARP×۲ را قبول نمی‌کند.</string>
+
+    <!-- Tor tuning (1.3.0) -->
+    <string name="tor_country_title">کشور پل</string>
+    <string name="tor_country_auto">تشخیص خودکار</string>
+    <string name="tor_country_desc">اینکه bridgedb پل‌های مربوط به کدام کشور را بدهد. تشخیص خودکار از شبکه می‌پرسد کجا هستید، و همین درخواست بیشتر از هر چیز اینجا شکست می‌خورد.</string>
+    <string name="tor_direct_secs_title">مدت صبر برای بوت‌استرپ</string>
+    <string name="tor_direct_auto">خودکار (۷۵ ثانیه)</string>
+    <string name="tor_direct_secs_value">%1$d ثانیه</string>
+    <string name="tor_direct_secs_desc">تور چقدر مسیر مستقیم را امتحان کند پیش از رفتن به سراغ پل‌ها. اگر مطمئنید تور بلاک است، کوتاه‌ترش کنید.</string>
+    <string name="tor_check_title">بررسی دسترسی</string>
+    <string name="tor_check_hint">check.torproject.org:443</string>
+    <string name="tor_check_desc">آدرسی که تور باید به آن برسد تا بوت‌استرپ موفق شمرده شود. فقط وقتی عوضش کنید که بوت‌استرپ مدام شکست می‌خورد در حالی که تور سالم به نظر می‌رسد — خود مقصد پیش‌فرض در بعضی شبکه‌ها بلاک است.</string>
 </resources>

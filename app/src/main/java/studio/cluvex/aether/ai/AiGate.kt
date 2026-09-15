@@ -67,6 +67,11 @@ object AiAvailability {
         // told to connect first, because switching mode is only possible while
         // disconnected anyway.
         !state.isConnected -> AiGate.DISCONNECTED
+        // A Psiphon exit is what Google's AI endpoints accept. Both chained modes
+        // provide one; plain Aether exits through WARP (refused) and the two Tor
+        // modes exit through a Tor address, which those endpoints challenge even
+        // harder than WARP. So the gate asks "is there a Psiphon hop", which is
+        // exactly what isChained means.
         !backend.isChained -> AiGate.WRONG_MODE
         !hasModel -> AiGate.NO_MODEL
         else -> AiGate.READY
@@ -81,6 +86,5 @@ object AiAvailability {
      * through WARP and get refused, which is the failure this whole gate exists to
      * avoid, so the port is derived from the mode rather than hard-coded.
      */
-    fun socksPort(backend: TransportBackend): Int =
-        if (backend.isChained) TunnelConfig.CHAIN_SOCKS_PORT else TunnelConfig.SOCKS_PORT
+    fun socksPort(backend: TransportBackend): Int = backend.exposedSocksPort
 }

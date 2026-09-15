@@ -65,27 +65,39 @@ object NetProbe {
     )
 
     /**
-     * SECURITY (audit 1.2.7-r2): TLS FIRST, on purpose.
+     * SECURITY (audit 1.2.7-r2, tightened in 1.3.0): TLS ONLY, on purpose.
      *
      * The order used to be cleartext-first (`ip-api.com:80`), so on a healthy
      * network the exit IP shown in the UI always arrived over plain HTTP - which
      * anyone on the path can rewrite. On the networks this app exists for that is
      * not theoretical: a censor able to answer the probe can make the badge show a
      * plausible foreign IP and flag while the traffic is not tunnelled at all,
-     * turning the app's own reassurance into the attack. The authenticated
-     * provider is now tried first and the cleartext ones are only a
-     * last-resort availability fallback.
+     * turning the app's own reassurance into the attack. 1.2.7-r2 moved the
+     * authenticated provider first and kept two cleartext entries as an
+     * availability fallback.
      *
-     * The country REFINEMENT (see [refineCountry]) still uses ip-api over plain
-     * HTTP because its free tier offers no TLS. The country label is therefore
-     * informational and must never be treated as proof of anything; the exit IP,
-     * which is what the self-test and the user actually rely on, now comes from an
-     * authenticated source whenever one is reachable.
+     * AUDIT F-5 (1.3.0): those two are gone. `1.1.1.1` serves the same
+     * `/cdn-cgi/trace` on 443, so the fallback costs nothing to authenticate, and
+     * `ip-api.com` as an IP source is dropped entirely. Two reasons beyond the
+     * rewrite risk: a cleartext GET for "what is my IP" is a recognisable
+     * fingerprint of this app on a network where the app's presence is itself the
+     * sensitive fact, and these are raw sockets, so `usesCleartextTraffic=false`
+     * never applied to them.
+     *
+     * The IP literal is deliberate ([GeoProvider.hostIsDomain] = false): no DNS is
+     * involved, so a poisoned resolver cannot redirect the probe. Verification
+     * still holds - the Cloudflare DNS certificate carries `1.1.1.1` as an
+     * iPAddress SAN and [tlsWrap] checks it through the platform verifier.
+     *
+     * The country REFINEMENT (see [refineCountry]) is still ip-api over plain
+     * HTTP, because its free tier offers no TLS. That label is informational and
+     * must never be treated as proof of anything; the exit IP, which is what the
+     * self-test and the user rely on, now only ever comes from an authenticated
+     * source.
      */
     private val GEO_PROVIDERS = listOf(
         GeoProvider("www.cloudflare.com", 443, "/cdn-cgi/trace", tls = true, hostIsDomain = true),
-        GeoProvider("ip-api.com", 80, "/json/?fields=status,query,countryCode", tls = false, hostIsDomain = true),
-        GeoProvider("1.1.1.1", 80, "/cdn-cgi/trace", tls = false, hostIsDomain = false),
+        GeoProvider("1.1.1.1", 443, "/cdn-cgi/trace", tls = true, hostIsDomain = false),
     )
 
     // ---- Public: geolocation --------------------------------------------

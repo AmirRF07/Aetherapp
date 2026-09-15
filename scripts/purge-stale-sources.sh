@@ -42,6 +42,37 @@ else
 		esac
 
 		if [ -e "$path" ]; then
+			# ---------------------------------------------------------------
+			# 1.3.0: refuse to delete a file the CURRENT sources depend on.
+			#
+			# This list is a record of what an OLD version deleted. A later
+			# version may legitimately bring a path back - 1.3.0 does exactly
+			# that with transport/TorSocksFront.kt, because Tor moved into the
+			# engine and the app front was rewritten against it. When that
+			# happens and the line is still here, this script deletes a file
+			# that belongs to the release, the commit step pushes the deletion
+			# to the branch, and the build fails with "Unresolved reference" in
+			# whichever file imported it. The source tree looked broken while
+			# the only broken thing was this manifest - and the deletion had
+			# already been committed, so the next build started from a tree
+			# that really was missing the file.
+			#
+			# So: a Kotlin file whose top-level name is referenced ANYWHERE
+			# else in the sources is not an orphan. Abort loudly instead of
+			# deleting it, and name the line to remove.
+			case "$path" in
+				*.kt)
+					symbol="$(basename "$path" .kt)"
+					if [ -d app/src/main/java ] && grep -rlqE "(^|[^A-Za-z0-9_.])${symbol}([^A-Za-z0-9_]|$)" \
+						--include='*.kt' app/src/main/java \
+						--exclude="$(basename "$path")" 2>/dev/null; then
+						echo "::error file=${MANIFEST}::${path} is still referenced by the current sources - it is NOT a leftover from an older version."
+						echo "::error::This release brings that file back. Remove its line from ${MANIFEST} instead of deleting the file,"
+						echo "::error::or the build will delete a source it needs and fail with 'Unresolved reference ${symbol}'."
+						exit 1
+					fi ;;
+			esac
+
 			rm -rf -- "$path"
 			echo "Removed stale file left over from an older version: $path"
 			removed=$((removed + 1))

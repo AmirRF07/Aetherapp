@@ -9,8 +9,30 @@ on:
 permissions:
   contents: write
 
+# ONE build at a time. Two pushes in quick succession used to start two runs that
+# both signed, both pushed commits back to the branch and both published to the
+# same release tag. Now the newer push cancels the older run on a branch, while a
+# tag build (v*) is never cancelled - it is a real release and has to finish.
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
+
 jobs:
   build:
+    # Do not spend a full build + release on a dependency bump. Merging a
+    # Dependabot PR is a push to main, which would otherwise publish an APK
+    # nobody asked for. Such commits are skipped here; when you DO want to build
+    # one, open Actions -> Build APK -> "Run workflow" and it builds normally.
+    # A tag push (v*) is never skipped - pushing a version tag is always an
+    # explicit release, whatever the commit it points at happens to be called.
+    # (The workflow's own commits already carry [skip ci] and cannot retrigger it,
+    # because they are pushed with the default GITHUB_TOKEN.)
+    if: >-
+      github.event_name != 'push'
+      || github.ref_type != 'branch'
+      || !(contains(github.event.head_commit.message, 'dependabot')
+      || startsWith(github.event.head_commit.message, 'deps')
+      || startsWith(github.event.head_commit.message, 'ci:'))
     runs-on: ubuntu-latest
     env:
       NDK_VERSION: "26.3.11579264"
@@ -81,6 +103,14 @@ jobs:
       - name: Build tunnel core (hev)
         run: bash scripts/build-natives.sh hev
 
+      # Tor bridges only. Deliberately NOT allowed to fail the release: Tor works
+      # without it (directly and through the tunnel), so a lyrebird build broken
+      # by an upstream Go change must not hold back an APK in which everything
+      # else is fine. The app logs the absence at connect time.
+      - name: Build pluggable transport (lyrebird, for Tor bridges)
+        continue-on-error: true
+        run: bash scripts/build-natives.sh pt
+
       # The engine build is the one step an automatic core upgrade can break:
       # upstream may add a struct field or a function parameter at any time and
       # no textual merge can guarantee the result still compiles (core 1.4.0
@@ -90,7 +120,9 @@ jobs:
       # it rolls the core back to the version the repo already shipped, rebuilds
       # and continues. Only a failure that is NOT caused by the auto-upgrade can
       # stop the pipeline here.
-      - name: Build engine (Aether)
+      # 1.3.0: builds with `--features tor` (see AETHER_FEATURES in
+      # build-natives.sh) and refuses to install an engine that has no Tor in it.
+      - name: Build engine (Aether, with Tor)
         run: |
           set -uo pipefail
           if bash scripts/build-natives.sh aether; then
@@ -276,6 +308,52 @@ jobs:
       # Retried on the same download-failure signatures as the build below, so an
       # artifact repository having a bad minute cannot fail a release here either. A
       # genuine test failure is never retried.
+      # DEPENDENCY-VULNERABILITY SCAN (audit 1.3.0, F-7).
+      #
+      # Runs here, after the engine build, because the Rust tree does not exist in
+      # this repository until sync-core.sh / fetch-natives.sh have run - a scan
+      # placed earlier would find nothing and pass.
+      #
+      # Deliberately NON-BLOCKING (continue-on-error). A fresh RUSTSEC advisory in
+      # a transitive dependency of the engine is a reason to look, not a reason to
+      # stop shipping a circumvention tool to people who need the release - and the
+      # engine tree is re-synced from upstream on every run, so the fix for most
+      # findings is not even in this repository. The point is that the finding now
+      # appears in the job summary on every push instead of waiting for the next
+      # manual audit.
+      #
+      # `cargo audit` fetches the advisory database itself, so it needs no key and
+      # no third-party action. Not added here: a Gradle-side CVE scan - the OWASP
+      # plugin now requires an NVD API key, and Dependabot (see
+      # .github/dependabot.yml) covers the Android dependency set server-side
+      # without runner time.
+      - name: Audit Rust dependencies (cargo audit)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          cargo install --locked cargo-audit || exit 0
+          status=0
+          for lock in native/aether/aether/Cargo.lock; do
+            [ -f "$lock" ] || continue
+            dir="$(dirname "$lock")"
+            echo "::group::cargo audit $dir"
+            ( cd "$dir" && cargo audit --color never | tee "${RUNNER_TEMP:-/tmp}/cargo-audit.txt" )
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            [ "$rc" -eq 0 ] || status=1
+          done
+          {
+            echo "### cargo audit"
+            if [ "$status" -eq 0 ]; then
+              echo "No advisories reported for the engine's dependency tree."
+            else
+              echo "Advisories reported - see the step log. Not blocking the release."
+              echo '```'
+              tail -n 60 "${RUNNER_TEMP:-/tmp}/cargo-audit.txt" 2>/dev/null || true
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run unit tests
         env:
           GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8"

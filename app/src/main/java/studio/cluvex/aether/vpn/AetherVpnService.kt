@@ -12,7 +12,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import studio.cluvex.aether.AetherApp
 import studio.cluvex.aether.MainActivity
@@ -25,6 +27,7 @@ import studio.cluvex.aether.core.EngineMeta
 import studio.cluvex.aether.core.AutoCandidate
 import studio.cluvex.aether.core.PingMonitor
 import studio.cluvex.aether.core.PortProbe
+import studio.cluvex.aether.core.TorBootstrap
 import studio.cluvex.aether.core.ProfileCodec
 import studio.cluvex.aether.core.HevTunnel
 import studio.cluvex.aether.core.RoutingEngine
@@ -40,10 +43,13 @@ import studio.cluvex.aether.model.ConnectionState
 import studio.cluvex.aether.model.Noize
 import studio.cluvex.aether.model.Protocol
 import studio.cluvex.aether.model.SplitMode
+import studio.cluvex.aether.model.TorMode
+import studio.cluvex.aether.model.TorBridges
 import studio.cluvex.aether.model.TransportBackend
 import studio.cluvex.aether.transport.ExternalTransport
 import studio.cluvex.aether.transport.ExternalTransportFactory
 import studio.cluvex.aether.transport.PsiphonHealth
+import studio.cluvex.aether.transport.TorSocksFront
 import studio.cluvex.aether.widget.AetherWidgetProvider
 import java.io.File
 
@@ -98,6 +104,14 @@ class AetherVpnService : VpnService() {
     /** One-shot guard for [registerSelfProbes]. */
     private var selfProbesRegistered = false
 
+    /** True between [promoteToForeground] and [stopForegroundCompat]. */
+    @Volatile
+    private var foregroundActive = false
+
+    /** Text of the notification currently posted, for the crash-handler rescue. */
+    @Volatile
+    private var lastNotifText: String? = null
+
     /**
      * Data-path byte total as it read at the previous watchdog decision, so a
      * failed probe can be checked against whether anything is actually moving.
@@ -106,6 +120,31 @@ class AetherVpnService : VpnService() {
     private var lastDataPathBytes = -1L
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        live = this
+        // FIRST STATEMENT, EVERY ACTION, NO EXCEPTIONS (1.3.0-r2 crash fix).
+        //
+        // ROOT CAUSE of "the app just closes" (ForegroundServiceDidNotStartInTime
+        // Exception in AetherVpnService): every caller reaches this service through
+        // ContextCompat.startForegroundService() -- AetherController.connect() AND
+        // .disconnect(), the notification's Disconnect action, the tile and the
+        // widget. Android's contract is per START REQUEST: each one must be
+        // answered with startForeground() within 10 seconds or the framework kills
+        // the process. The old code answered it only in the connect branch, so the
+        // DISCONNECT branch returned without ever promoting the service and the
+        // system killed the app about ten seconds later -- with the tunnel possibly
+        // still up. Tapping Disconnect (or Cancel while it was verifying) was
+        // therefore a guaranteed crash, not a rare race.
+        //
+        // Promoting first is also correct for the strict kill switch: that path
+        // deliberately KEEPS the service alive with a blackhole TUN, so it needs a
+        // foreground notification anyway. And it must never itself throw: a failure
+        // to post the notification may not take the disconnect down with it.
+        promoteToForeground(
+            when (intent?.action) {
+                ACTION_DISCONNECT -> getString(R.string.state_disconnecting)
+                else -> getString(R.string.state_launching)
+            },
+        )
         when (intent?.action) {
             ACTION_DISCONNECT -> {
                 // STRICT KILL SWITCH (1.2.4): a manual disconnect must not
@@ -122,11 +161,31 @@ class AetherVpnService : VpnService() {
             }
             else -> {
                 val profile = ProfileCodec.decode(intent?.getStringExtra(EXTRA_PROFILE))
-                startForeground(NOTIF_ID, buildNotification(getString(R.string.state_launching)))
                 startTunnel(profile)
             }
         }
         return START_STICKY
+    }
+
+    /**
+     * Answers the current start request with [startForeground], swallowing any
+     * failure.
+     *
+     * Idempotent by design: calling it when the service is already foreground just
+     * refreshes the notification, which is exactly what a repeat start request
+     * needs. Also used by [AetherApp]'s crash handler as a last-ditch rescue.
+     */
+    fun promoteToForeground(text: String) {
+        lastNotifText = text
+        try {
+            startForeground(NOTIF_ID, buildNotification(text))
+            foregroundActive = true
+        } catch (t: Throwable) {
+            // Anything here (a denied notification channel, an OEM restriction, a
+            // start-not-allowed on Android 12+) must not turn into a second crash
+            // on top of the first problem. The tunnel logic below still runs.
+            DiagnosticsLog.w(TAG, "startForeground failed: ${t.javaClass.simpleName}: ${t.message}")
+        }
     }
 
     /**
@@ -206,6 +265,25 @@ class AetherVpnService : VpnService() {
         if (profile.backend.usesExternal) {
             connectExternal(profile)
             return
+        }
+
+        // The two modes whose device traffic leaves through Tor. They cannot take
+        // the plain path below for one reason that is a property of the protocol
+        // rather than of this app: Tor carries TCP only, and hev sends every UDP
+        // flow - so every DNS query - as SOCKS5 UDP ASSOCIATE. See connectTor.
+        if (profile.backend.needsTorFront) {
+            connectTor(profile)
+            return
+        }
+
+        // The reverse chain needs no front and no second stage: what it exposes on
+        // the usual port is a full WARP tunnel that happens to have been dialled
+        // through Tor, so it carries UDP and DNS like any other tunnel. It takes the
+        // plain path below - only the connect budget and the transport differ, and
+        // both of those are decided in connectAetherStage's plan.
+        if (profile.backend.torMode == TorMode.REVERSE) {
+            AetherController.setState(ConnectionState.Connecting)
+            updateNotification(getString(R.string.state_tor_bootstrap))
         }
 
         val resolved: ConnectionProfile =
@@ -442,6 +520,105 @@ class AetherVpnService : VpnService() {
     }
 
     /**
+     * Drives a session whose exit is Tor: `Tor` and `Aether -> Tor`.
+     *
+     * ```
+     *   Tor              engine --tor-only  -> SOCKS5 127.0.0.1:1819 IS Tor
+     *   Aether -> Tor    engine --tor       -> 1819 stays WARP, Tor on 1820
+     *   both             TorSocksFront      -> SOCKS5 127.0.0.1:1821
+     *   then             TUN + tun2socks    -> 1821                 (exit = Tor)
+     * ```
+     *
+     * The front is not optional and it is not a nicety. hev-socks5-tunnel carries
+     * UDP over SOCKS5 `UDP ASSOCIATE`, a Tor proxy answers `CONNECT` only, and
+     * every DNS query on Android is UDP - so handing tun2socks a Tor listener
+     * directly produces a session that establishes, verifies, reports a Tor exit
+     * and opens nothing at all. That is the failure the 1.2.7 Tor backend shipped,
+     * and [TorSocksFront] is where it is answered.
+     *
+     * `Aether -> Tor` is the mode to use on a network that blocks Tor: the guards
+     * are dialled through the tunnel, so the operator never sees Tor traffic and
+     * the bootstrap runs at tunnel speed. Plain `Tor` has to reach the network by
+     * itself and turns to bridges when it cannot (see [ConnectionProfile.torBridges]).
+     */
+    private suspend fun connectTor(profile: ConnectionProfile) {
+        AetherController.setState(ConnectionState.Connecting)
+        updateNotification(getString(R.string.state_connecting))
+        cleanupNativeOnly()
+
+        val engineProfile = connectAetherStage(profile)
+
+        // Where the engine put Tor. In --tor-only mode this is the engine's only
+        // listener and the stage gate above already proved it carries TCP; with
+        // Tor inside the tunnel it is a second listener that appears once Tor has
+        // bootstrapped THROUGH the tunnel, which is why it is waited for
+        // separately and with a budget measured in minutes rather than seconds.
+        val torPort = profile.backend.torSocksPort
+            ?: error("${profile.backend} has no Tor listener")
+        if (torPort != SOCKS_PORT) {
+            AetherController.setState(ConnectionState.Verifying)
+            updateNotification(getString(R.string.state_tor_bootstrap))
+            DiagnosticsLog.i(
+                TAG,
+                "Waiting for Tor on $SOCKS_HOST:$torPort - the first bootstrap downloads " +
+                    "the directory and can take a few minutes.",
+            )
+            val up = PortProbe.awaitOpen(SOCKS_HOST, torPort, TOR_BOOTSTRAP_TIMEOUT_MS) {
+                engine?.isAlive() == true
+            }
+            if (!up) {
+                DiagnosticsLog.e(TAG, "Tor never opened its listener on $torPort.")
+                throw IllegalStateException(getString(R.string.err_tor_bootstrap))
+            }
+            DiagnosticsLog.i(TAG, "Tor is up on $SOCKS_HOST:$torPort.")
+        }
+
+        if (!PortProbe.awaitClosed(SOCKS_HOST, TOR_FRONT_PORT, PORT_RELEASE_WAIT_MS)) {
+            DiagnosticsLog.w(
+                TAG,
+                "Local port $TOR_FRONT_PORT is still busy after ${PORT_RELEASE_WAIT_MS / 1000}s - " +
+                    "starting anyway.",
+            )
+        }
+        val frontPort = TorSocksFront.start(TOR_FRONT_PORT, SOCKS_HOST, torPort)
+
+        if (profile.lanShare) runCatching { ShareCredentials.ensure(this) }
+
+        if (profile.proxyMode) {
+            check(ShareBridge.startSync(localOnly = !profile.lanShare, upstreamPort = frontPort)) {
+                getString(R.string.err_proxy_ports)
+            }
+        } else {
+            establishTun(profile)
+            startTun2Socks(profile, frontPort)
+            if (profile.lanShare) ShareBridge.start(localOnly = false, upstreamPort = frontPort)
+        }
+
+        AetherController.setState(ConnectionState.Verifying)
+        updateNotification(getString(R.string.state_verifying))
+        val diagPort = if (profile.proxyMode) ShareBridge.socksPort.value ?: frontPort else frontPort
+        // The same grace an external stage gets. A Tor circuit is built lazily per
+        // stream, so the first request through a freshly bootstrapped Tor is slow
+        // in a way that says nothing about whether the session works.
+        val healthy = runCatching {
+            Diagnostics.run(port = diagPort, graceMs = Diagnostics.EXTERNAL_GRACE_MS)
+        }.getOrDefault(false)
+        check(healthy) { getString(R.string.err_selftest) }
+
+        EngineMeta.setProtocol(
+            if (profile.backend.usesWarp) "${engineProfile.protocol.name} \u2192 TOR" else "TOR",
+        )
+        PingMonitor.setTunnelPort(frontPort)
+        PingMonitor.reset()
+        AetherController.setState(ConnectionState.Connected("$SOCKS_HOST:$frontPort"))
+        updateNotification(getString(R.string.state_connected))
+        DiagnosticsLog.i(TAG, "${profile.backend.pipelineLabel} tunnel ready (exit = a Tor exit node).")
+        TorSocksFront.dropSummary()?.let { DiagnosticsLog.i(TAG, it) }
+
+        superviseEngine(engineProfile)
+    }
+
+    /**
      * Chained stage 1: run the Aether engine until its local SOCKS5 port is
      * genuinely carrying TCP, and stop there.
      *
@@ -453,15 +630,27 @@ class AetherVpnService : VpnService() {
     private suspend fun connectAetherStage(profile: ConnectionProfile): ConnectionProfile {
         DiagnosticsLog.i(
             TAG,
-            "Chained mode: stage 1 = Aether engine on $SOCKS_HOST:$SOCKS_PORT, " +
-                "stage 2 = ${profile.backend.externalKind?.name} behind its UDP-capable " +
-                "front on $SOCKS_HOST:$CHAIN_SOCKS_PORT",
+            "Stage 1 = engine on $SOCKS_HOST:$SOCKS_PORT" +
+                (profile.backend.torMode?.let { " (Tor: $it)" } ?: "") +
+                ", stage 2 = ${profile.backend.externalKind?.name ?: "TorSocksFront"} behind its " +
+                "UDP-capable front on $SOCKS_HOST:${profile.backend.exposedSocksPort}",
         )
         // Stage 1 owns neither the TUN nor the share bridge: those belong to the
         // finished chain, and letting stage 1 build them would capture the
         // engine's own traffic and deadlock the tunnel inside itself.
+        // Which engine mode stage 1 runs in. Overwriting this with plain AETHER -
+        // which is what a chained Psiphon session needs - would strip `--tor` or
+        // `--tor-only` from the engine's argv and silently produce a session with
+        // no Tor in it at all, i.e. the right exit type replaced by the wrong one
+        // with nothing in the log to say so.
+        val stageBackend = when (profile.backend.torMode) {
+            null -> TransportBackend.AETHER
+            TorMode.CHAIN -> TransportBackend.AETHER_TOR
+            TorMode.ONLY -> TransportBackend.TOR
+            TorMode.REVERSE -> TransportBackend.TOR_AETHER
+        }
         val stage = profile.copy(
-            backend = TransportBackend.AETHER,
+            backend = stageBackend,
             proxyMode = false,
             lanShare = false,
             // A chained session pays this hop's latency on every packet and then
@@ -470,17 +659,45 @@ class AetherVpnService : VpnService() {
             // ConnectionProfile.chainedStage.
             chainedStage = true,
         )
-        val plan = if (stage.protocol == Protocol.AUTO) {
-            AetherController.setState(ConnectionState.Launching)
-            updateNotification(getString(R.string.state_analyzing))
-            SmartAuto.buildPlan(stage, SmartAuto.fingerprint(this))
-        } else {
-            directPlan(stage)
+        val plan = when {
+            // --tor-only brings up no tunnel, so there is no endpoint to scan, no
+            // transport to obfuscate and nothing for a protocol ladder to try:
+            // every rung would be the same engine invocation. One attempt, with a
+            // budget sized for a Tor bootstrap instead of an endpoint scan.
+            !stage.backend.usesWarp -> listOf(
+                AutoCandidate(stage, torBudget(stage), "Tor \u00b7 direct or via bridges"),
+            )
+            // The reverse chain: one attempt, on the only transport it can use, with
+            // a Tor-sized budget. A protocol ladder here would be actively harmful -
+            // the engine refuses --wg and --gool in this mode, so the rungs that try
+            // them would fail instantly and burn the budget Tor needs to bootstrap.
+            stage.backend.torMode == TorMode.REVERSE -> listOf(
+                AutoCandidate(
+                    stage.copy(protocol = Protocol.MASQUE, masqueHttp2 = true),
+                    torBudget(stage),
+                    "MASQUE \u00b7 h2 \u00b7 through Tor",
+                ),
+            )
+            stage.protocol == Protocol.AUTO -> {
+                AetherController.setState(ConnectionState.Launching)
+                updateNotification(getString(R.string.state_analyzing))
+                SmartAuto.buildPlan(stage, SmartAuto.fingerprint(this))
+            }
+            else -> directPlan(stage)
         }
         val resolved = runLadder(plan, getString(R.string.err_protocol_failed), stageOnly = true)
         DiagnosticsLog.i(TAG, "Stage 1 up (${resolved.protocol.name}) - handing the exit to stage 2.")
         return resolved
     }
+
+    /**
+     * Time budget for one tor-fronted attempt: long enough for the engine's own
+     * bridge fallback when bridges are permitted, the plain bootstrap budget when
+     * they are not. Paired with the stall detector in [connectAttempt], which is
+     * what keeps the long budget from turning into a long silence.
+     */
+    private fun torBudget(stage: ConnectionProfile): Long =
+        if (stage.torBridges != TorBridges.OFF) TOR_BRIDGE_BUDGET_MS else TOR_BOOTSTRAP_TIMEOUT_MS
 
     /**
      * SOCKS5 port the finished pipeline exposes for [profile].
@@ -490,7 +707,7 @@ class AetherVpnService : VpnService() {
      * speaks UDP.
      */
     private fun effectiveSocksPort(profile: ConnectionProfile): Int =
-        if (profile.backend.usesExternal) CHAIN_SOCKS_PORT else SOCKS_PORT
+        profile.backend.exposedSocksPort
 
     /**
      * SMART AUTO (root-cause rework of the broken Auto protocol): fingerprint
@@ -568,6 +785,10 @@ class AetherVpnService : VpnService() {
         var lastError: Exception? = null
 
         plan.forEachIndexed { index, candidate ->
+            // A cancelled session must not climb to the next rung: starting an
+            // engine here is what left an unsupervised libaether.so running after
+            // the user pressed Disconnect. See [probeOrFalse].
+            currentCoroutineContext().ensureActive()
             DiagnosticsLog.i(TAG, "Attempt ${index + 1}/${plan.size} → ${candidate.label}")
             try {
                 connectAttempt(candidate.profile, candidate.timeoutMs, stageOnly)
@@ -616,6 +837,7 @@ class AetherVpnService : VpnService() {
             )
         }
         DiagnosticsLog.i(TAG, "Launching engine (libaether.so)…")
+        val launchedAt = SystemClock.elapsedRealtime()
         engine = AetherProcess(applicationInfo.nativeLibraryDir, filesDir).also { it.start(profile) }
 
         AetherController.setState(ConnectionState.Connecting)
@@ -646,12 +868,52 @@ class AetherVpnService : VpnService() {
             // no DNS/geo lookup, because the exit belongs to stage 2.
             AetherController.setState(ConnectionState.Verifying)
             updateNotification(getString(R.string.state_verifying))
-            val stageOk = runCatching {
-                Diagnostics.runProxyStage(SOCKS_HOST, SOCKS_PORT)
-            }.getOrDefault(false)
+            // 1.3.0 FIELD FIX. When stage 1 IS Tor (`Tor`, `Tor -> Psiphon`, and
+            // the reverse chain), the listener exists from the first millisecond
+            // but cannot answer until the bootstrap has reached the network. The
+            // handshake therefore gets the rest of THIS attempt's budget instead
+            // of a single 4-second window -- the budget that was computed for the
+            // bootstrap in the first place and that the open port used to skip
+            // straight past. Every other stage keeps the old single-shot gate.
+            val torFronted = profile.backend.torMode.let {
+                it == TorMode.ONLY || it == TorMode.REVERSE
+            }
+            val handshakeGrace = if (torFronted) {
+                (timeoutMs - (SystemClock.elapsedRealtime() - launchedAt)).coerceAtLeast(0L)
+            } else {
+                0L
+            }
+            // Waiting minutes is only acceptable while something is happening. A
+            // bootstrap that stops moving is what a network filtering Tor looks
+            // like, and the user gets told that instead of watching a spinner.
+            // With bridges configured the engine has its own, slower fallback to
+            // work through, so the app's patience for a silent gap grows too.
+            val stallMs = if (profile.torBridges != TorBridges.OFF) {
+                TOR_STALL_BRIDGED_MS
+            } else {
+                TOR_STALL_DIRECT_MS
+            }
+            val ticker = if (torFronted) {
+                launchBootstrapTicker(profile.torBridges != TorBridges.OFF)
+            } else {
+                null
+            }
+            val stageOk = try {
+                probeOrFalse {
+                    Diagnostics.runProxyStage(
+                        SOCKS_HOST,
+                        SOCKS_PORT,
+                        handshakeGraceMs = handshakeGrace,
+                        alive = { engine?.isAlive() == true },
+                        abort = { torFronted && TorBootstrap.stalled(stallMs) },
+                    )
+                }
+            } finally {
+                ticker?.cancel()
+            }
             if (!stageOk) {
                 DiagnosticsLog.e(TAG, "Stage 1 cannot open outbound connections - trying the next strategy.")
-                throw IllegalStateException(getString(R.string.err_selftest))
+                throw IllegalStateException(stageFailureMessage(torFronted))
             }
             return
         }
@@ -715,7 +977,7 @@ class AetherVpnService : VpnService() {
         val diagPort =
             if (profile.proxyMode) ShareBridge.socksPort.value ?: SOCKS_PORT
             else SOCKS_PORT
-        val healthy = runCatching { Diagnostics.run(port = diagPort) }.getOrDefault(false)
+        val healthy = probeOrFalse { Diagnostics.run(port = diagPort) }
         if (!healthy) {
             DiagnosticsLog.e(TAG, "Self-test failed — refusing to report Connected.")
             throw IllegalStateException(getString(R.string.err_selftest))
@@ -817,6 +1079,84 @@ class AetherVpnService : VpnService() {
     }
 
     private fun currentScopeActive(): Boolean = runJob?.isActive ?: false
+
+    /**
+     * Runs a probe and turns a real failure into `false` -- but lets a
+     * CANCELLATION through.
+     *
+     * ROOT CAUSE of the orphaned engine (1.3.0-r2): the self-test used to be
+     * wrapped in `runCatching`, which catches Throwable and therefore also
+     * CancellationException. Disconnecting while the session was verifying then
+     * looked exactly like a failed self-test: the ladder logged "Self-test failed",
+     * treated the cancelled session as a bad strategy, and SPAWNED THE NEXT ENGINE
+     * -- which the already-cancelled coroutine could no longer supervise or stop.
+     * The log of that session ends mid-attempt with a live libaether.so still
+     * bootstrapping Tor and no app code left watching it.
+     *
+     * A cancellation is not a verdict about the tunnel. It has exactly one correct
+     * answer: stop.
+     */
+    private suspend fun probeOrFalse(block: suspend () -> Boolean): Boolean =
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            false
+        }
+
+    /**
+     * Live bootstrap progress in the notification while a tor-fronted stage 1 is
+     * coming up.
+     *
+     * Five minutes of a motionless "Building Tor circuits…" is indistinguishable
+     * from a hung app, and that is precisely the window in which a first Tor
+     * bootstrap is legitimately slow. The percentage the engine already prints is
+     * shown instead; once the bootstrap has visibly stopped moving AND bridges are
+     * permitted, the notification says THAT, because the wait is then no longer a
+     * slow bootstrap but the engine's bridge fallback.
+     */
+    private fun launchBootstrapTicker(bridgesAllowed: Boolean): Job = scope.launch {
+        var bridgeNoticeLogged = false
+        while (true) {
+            val snap = TorBootstrap.state.value
+            val waitingOnBridges = bridgesAllowed && TorBootstrap.stalled(TOR_STALL_DIRECT_MS)
+            val text = when {
+                waitingOnBridges -> getString(R.string.state_tor_bridges)
+                snap.percent >= 0 -> getString(R.string.state_tor_bootstrap_pct, snap.percent)
+                else -> getString(R.string.state_tor_bootstrap)
+            }
+            updateNotification(text)
+            if (waitingOnBridges && !bridgeNoticeLogged) {
+                bridgeNoticeLogged = true
+                DiagnosticsLog.w(
+                    TAG,
+                    "Tor has not advanced for ${TOR_STALL_DIRECT_MS / 1000}s " +
+                        "(${TorBootstrap.describe()}) - this is what a network filtering Tor " +
+                        "looks like. Waiting for the engine's bridge fallback.",
+                )
+            }
+            delay(BOOTSTRAP_TICK_MS)
+        }
+    }
+
+    /**
+     * Why stage 1 failed, in the user's own terms.
+     *
+     * The generic "tunnel started but the self-test failed" was the single most
+     * misleading string in 1.3.0: for a tor-fronted stage it was shown for a Tor
+     * that had never even reached the network, which sent the user (and the in-app
+     * assistant reading the log) looking for a tunnel problem that did not exist.
+     */
+    private fun stageFailureMessage(torFronted: Boolean): String {
+        if (!torFronted) return getString(R.string.err_selftest)
+        val snap = TorBootstrap.state.value
+        return when {
+            !TorBootstrap.seen -> getString(R.string.err_tor_no_progress)
+            !snap.done -> getString(R.string.err_tor_blocked, snap.percent)
+            else -> getString(R.string.err_tor_no_stream)
+        }
+    }
 
     private fun establishTun(profile: ConnectionProfile) {
         // 1.2.7-r3: a chained session's exit is a Psiphon server, and those are
@@ -1287,6 +1627,16 @@ class AetherVpnService : VpnService() {
         } catch (_: Throwable) {
         }
         externalTransport = null
+        // Before the engine: the front's upstream is the engine's Tor listener, and
+        // a front left running against a dead listener would answer tun2socks with
+        // failures instead of letting the port close.
+        try {
+            if (TorSocksFront.isRunning()) {
+                TorSocksFront.dropSummary()?.let { DiagnosticsLog.i(TAG, it) }
+                TorSocksFront.stop()
+            }
+        } catch (_: Throwable) {
+        }
         try {
             engine?.stop()
         } catch (_: Throwable) {
@@ -1304,10 +1654,14 @@ class AetherVpnService : VpnService() {
             .addAddress(TunnelConfig.TUN_IPV4, TunnelConfig.TUN_IPV4_PREFIX)
             .addRoute("0.0.0.0", 0)
             .setBlocking(true)
-        if (profile.ipv6LeakProtection) {
-            builder.addAddress(TunnelConfig.TUN_IPV6, TunnelConfig.TUN_IPV6_PREFIX)
-            builder.addRoute("::", 0)
-        }
+        // AUDIT F-1: the lockdown TUN is a blackhole - nothing it captures is
+        // forwarded anywhere. So v6 is claimed UNCONDITIONALLY here, unlike in
+        // the real tunnel builder where profile.ipv6LeakProtection exists to let
+        // a user rescue a broken v6 network. Gating the blackhole on that switch
+        // left a v6 path in the clear during exactly the window the kill switch
+        // is for: the tunnel is down, v4 is held, and v6 is not.
+        builder.addAddress(TunnelConfig.TUN_IPV6, TunnelConfig.TUN_IPV6_PREFIX)
+        builder.addRoute("::", 0)
         tun = runCatching { builder.establish() }.getOrNull()
     }
 
@@ -1331,6 +1685,16 @@ class AetherVpnService : VpnService() {
         } catch (_: Throwable) {
         }
         externalTransport = null
+        // Before the engine: the front's upstream is the engine's Tor listener, and
+        // a front left running against a dead listener would answer tun2socks with
+        // failures instead of letting the port close.
+        try {
+            if (TorSocksFront.isRunning()) {
+                TorSocksFront.dropSummary()?.let { DiagnosticsLog.i(TAG, it) }
+                TorSocksFront.stop()
+            }
+        } catch (_: Throwable) {
+        }
         try {
             engine?.stop()
         } catch (_: Throwable) {
@@ -1344,6 +1708,7 @@ class AetherVpnService : VpnService() {
     }
 
     private fun stopForegroundCompat() {
+        foregroundActive = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -1352,12 +1717,42 @@ class AetherVpnService : VpnService() {
         }
     }
 
+    /**
+     * Answers a start request the framework says went unanswered, from
+     * [AetherApp]'s crash handler. Returns true when the service is foreground
+     * afterwards.
+     *
+     * This exists as a SAFETY NET, not as the fix: the fix is that
+     * [onStartCommand] promotes the service for every action. If a future path
+     * ever forgets again, the app recovers with a notification instead of
+     * vanishing while the tunnel is up.
+     */
+    fun rescueForeground(): Boolean {
+        promoteToForeground(lastNotifText ?: getString(R.string.state_connecting))
+        return foregroundActive
+    }
+
+    /**
+     * Kills the natives from the crash handler so a dying app cannot leave a
+     * running engine behind.
+     *
+     * The engine is a CHILD PROCESS: it survives its parent, which is exactly what
+     * the 1.3.0 field log shows -- libaether.so kept bootstrapping Tor for eleven
+     * seconds after the app code had stopped watching it. Bounded work only
+     * (AetherProcess.stop gives SIGTERM 250 ms, then SIGKILL), because this runs
+     * inside the crash path.
+     */
+    fun killNativesFromCrashHandler() {
+        runCatching { cleanupNativeOnly() }
+    }
+
     override fun onRevoke() {
         stopEverything()
         super.onRevoke()
     }
 
     override fun onDestroy() {
+        if (live === this) live = null
         runJob?.cancel()
         cleanupNativeOnly()
         scope.coroutineContext[Job]?.cancel()
@@ -1404,6 +1799,17 @@ class AetherVpnService : VpnService() {
         const val ACTION_DISCONNECT = "studio.cluvex.aether.DISCONNECT"
         const val EXTRA_PROFILE = "profile"
 
+        /**
+         * The running service instance, or null when none is alive.
+         *
+         * Only the crash handler in [AetherApp] uses it, and only to promote the
+         * service to the foreground when the framework complains that nobody did.
+         * Cleared in [onDestroy], so it never keeps a dead Service reachable.
+         */
+        @Volatile
+        var live: AetherVpnService? = null
+            private set
+
         private const val NOTIF_ID = 0x4145
         private const val TAG = "vpn"
         private const val SOCKS_HOST = TunnelConfig.SOCKS_HOST
@@ -1411,6 +1817,50 @@ class AetherVpnService : VpnService() {
 
         /** Where a chained session's SECOND stage listens (see connectExternal). */
         private const val CHAIN_SOCKS_PORT = TunnelConfig.CHAIN_SOCKS_PORT
+
+        /** Where the DNS-capable Tor front listens (see connectTor). */
+        private const val TOR_FRONT_PORT = TunnelConfig.TOR_FRONT_PORT
+
+        /**
+         * How long Tor may take to become usable.
+         *
+         * Minutes, not seconds, and deliberately so. A first bootstrap downloads a
+         * directory consensus; on a network that blocks Tor the engine additionally
+         * tries plainly for a while, asks bridgedb for bridges suited to the country
+         * it appears to be in, and then works through them one transport at a time -
+         * and a bridge only counts as working once a stream has actually opened
+         * through it. Cutting that off early is how the 1.2.7 Tor backend earned its
+         * reputation for hanging: it was not hanging, it was being killed halfway
+         * through the one slow step Tor has.
+         */
+        private const val TOR_BOOTSTRAP_TIMEOUT_MS = 300_000L
+
+        /**
+         * The same budget, for a Tor that is allowed to fall back to bridges.
+         *
+         * The engine tries directly for `AETHER_TOR_BRIDGE_SECS` (360 s by
+         * default) before it asks for bridges at all, so a 300-second app budget
+         * guaranteed that the bridge fallback -- the only automatic escape on a
+         * network that filters Tor -- could never once happen. The bridged budget
+         * has to outlast that fallback plus a bootstrap through the bridge it
+         * finds.
+         */
+        private const val TOR_BRIDGE_BUDGET_MS = 600_000L
+
+        /**
+         * How long the bootstrap percentage may stand still before the attempt is
+         * abandoned.
+         *
+         * With bridges switched OFF a stalled bootstrap has nothing left to try,
+         * so waiting out the whole budget only delays a failure the user could
+         * already act on. With bridges permitted the stall IS the trigger for the
+         * engine's fallback, so the patience has to cover it.
+         */
+        private const val TOR_STALL_DIRECT_MS = 45_000L
+        private const val TOR_STALL_BRIDGED_MS = 420_000L
+
+        /** Notification refresh while a Tor bootstrap is in progress. */
+        private const val BOOTSTRAP_TICK_MS = 2_000L
         private const val MTU = TunnelConfig.MTU
         private const val MAX_RETRIES = 3
         private val BACKOFF = longArrayOf(2000L, 5000L, 10000L)

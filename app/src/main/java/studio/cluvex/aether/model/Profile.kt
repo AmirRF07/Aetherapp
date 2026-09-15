@@ -1,9 +1,31 @@
 package studio.cluvex.aether.model
 
 import androidx.compose.runtime.Immutable
+import studio.cluvex.aether.core.TunnelConfig
 
-/** Transport protocol, mapped 1:1 to the desktop app's CLI flags. */
-enum class Protocol { AUTO, MASQUE, WIREGUARD, GOOL }
+/**
+ * Transport protocol, mapped 1:1 to the desktop app's CLI flags.
+ *
+ * MIM (`--mim`, MASQUE-in-MASQUE) is new in core 2.0.0: two MASQUE hops, for an
+ * exit address in a different range than a single hop gives. It is to MASQUE what
+ * gool is to WireGuard, and it is appended rather than inserted because
+ * [studio.cluvex.aether.data.ProfileStore] persists the NAME, not the ordinal.
+ */
+enum class Protocol { AUTO, MASQUE, WIREGUARD, GOOL, MIM }
+
+/**
+ * Whether Tor should reach the network through bridges (core 2.0.0).
+ *
+ * [AUTO] is the engine's own behaviour: try Tor plainly for a moment and turn to
+ * bridges fetched from bridgedb when that gets nowhere. [ALWAYS] skips the plain
+ * attempt (`--tor-bridges`), which is the right choice on a network already known
+ * to block Tor. [OFF] never uses bridges (`--no-tor-bridges`).
+ *
+ * This has no effect in the `Aether -> Tor` mode and the app says so: Tor's
+ * guards are dialled through the tunnel there, so the local network never sees
+ * Tor and there is nothing for a bridge to hide from.
+ */
+enum class TorBridges { AUTO, ALWAYS, OFF }
 
 /** Endpoint scanning strategy. IRONCLAD added in engine v1.3.0. */
 enum class ScanMode { TURBO, BALANCED, THOROUGH, STEALTH, IRONCLAD }
@@ -157,8 +179,16 @@ data class ConnectionProfile(
 
     // ---- Added in 1.2.4 (feature parity) ----
 
-    /** Kill switch: if the tunnel drops, keep a blocking blackhole TUN up so nothing leaks direct. */
-    val killSwitch: Boolean = false,
+    /**
+     * Kill switch: if the tunnel drops, keep a blocking blackhole TUN up so nothing leaks direct.
+     *
+     * AUDIT F-2: on by default since 1.3.0. On a circumvention tool the answer to
+     * "the tunnel just died" must be "no traffic", not "traffic in the clear" -
+     * the leak happens in the seconds before the user notices the icon changed.
+     * A user who explicitly turned it off keeps it off: [ProfileStore] only falls
+     * back to this default when the key was never written.
+     */
+    val killSwitch: Boolean = true,
     /** Strict kill switch: stay in lockdown even after a MANUAL disconnect until the user lifts it. */
     val strictKillSwitch: Boolean = false,
     /** Route IPv6 through the tunnel as well (prevents IPv6 leaks). On by default. */
@@ -235,6 +265,62 @@ data class ConnectionProfile(
      */
     val fastEndpointOnly: Boolean = true,
 
+    // ---- Added in 1.3.0 (engine core 2.0.0: Tor) ----
+
+    /**
+     * Whether Tor uses bridges. Only consulted when the backend actually needs
+     * Tor to reach the network on its own, i.e. in the two `--tor-only` modes.
+     */
+    val torBridges: TorBridges = TorBridges.AUTO,
+
+    /**
+     * Bridge lines the user pasted in by hand, one per line, instead of the ones
+     * the engine fetches from bridgedb.
+     *
+     * A line looks like
+     * `obfs4 192.0.2.55:38114 <FINGERPRINT> cert=... iat-mode=0`. Anything that
+     * does not start with a known transport name is dropped by [sanitizedBridges]
+     * rather than passed on, because a malformed line would otherwise become a
+     * second engine argument.
+     */
+    val torBridgeLines: String = "",
+
+    /**
+     * Two-letter country code handed to bridgedb, or blank to let the engine work
+     * it out.
+     *
+     * Worth overriding, because the engine's own detection (`detect_country` in
+     * `bridges.rs`) asks Cloudflare's trace endpoint where it is - and on the
+     * networks where bridges matter most that request is exactly what fails or
+     * answers with the wrong location. Naming the country skips the guess and asks
+     * bridgedb for bridges that work there.
+     *
+     * The engine requires exactly two characters and lowercases them; anything else
+     * is ignored by [sanitizedTorCountry] rather than sent, since a rejected value
+     * would silently fall back to detection and look like the setting did nothing.
+     */
+    val torCountry: String = "",
+
+    /**
+     * How long Tor may try to reach the network plainly before bridges are brought
+     * in, in seconds. 0 keeps the engine's own 75.
+     *
+     * Raising it helps where the direct path is slow but not blocked; lowering it
+     * helps where it is definitely blocked and those seconds are pure waiting.
+     */
+    val torDirectSecs: Int = 0,
+
+    /**
+     * `host:port` Tor must be able to reach before the engine accepts the bootstrap
+     * as working. Blank keeps the engine's `check.torproject.org:443`.
+     *
+     * The default is itself a censorship target: a network that blocks
+     * check.torproject.org makes a perfectly working Tor circuit fail this proof,
+     * and the app reports a bootstrap failure for a Tor that was fine. Pointing it
+     * at something ordinary that is up locally removes that false negative.
+     */
+    val torCheck: String = "",
+
     /**
      * True only for the Aether hop of a chained session, set by the VPN service.
      *
@@ -244,6 +330,10 @@ data class ConnectionProfile(
     val chainedStage: Boolean = false,
 
 ) {
+    /** True when Tor is asked to reach the network through bridges of any kind. */
+    val hasCustomBridges: Boolean
+        get() = torBridgeLines.isNotBlank() && sanitizedBridges().isNotEmpty()
+
     /** True when a Zero Trust organization is configured and usable. */
     val hasTeam: Boolean
         get() = teamAuth != TeamAuth.OFF && team.isNotBlank()
@@ -252,11 +342,122 @@ data class ConnectionProfile(
     val hasManualPeer: Boolean
         get() = endpointMode == EndpointMode.MANUAL_PEER && manualPeer.isNotBlank()
 
+    /**
+     * The protocol the engine is actually asked for.
+     *
+     * Differs from [protocol] in exactly one case: the reverse chain. Tor carries
+     * TCP only and WARP's WireGuard endpoints answer on UDP alone, so core 2.0.0
+     * runs `--tor-reverse` over MASQUE/HTTP-2 and **refuses `--wg` and `--gool`**.
+     * Sending the user's WireGuard selection anyway would make the engine exit
+     * immediately - which, from the app's side, is indistinguishable from a blocked
+     * network, and would be diagnosed as one. So the override happens here, once,
+     * where every argv is built, instead of in each caller; the UI says the same
+     * thing next to the disabled protocol selector.
+     */
+    val effectiveProtocol: Protocol
+        get() = if (backend.torMode == TorMode.REVERSE) Protocol.MASQUE else protocol
+
+    /** Validated bridge lines for `--tor-bridge`, one entry per line. */
+    /**
+     * The country code in the form the engine accepts, or null.
+     *
+     * Two ASCII letters, lowercased. Everything else returns null and nothing is
+     * sent: the engine would ignore it anyway, and a variable that is present but
+     * ignored is harder to diagnose than one that was never set.
+     */
+    fun sanitizedTorCountry(): String? = torCountry.trim().lowercase()
+        .takeIf { it.length == 2 && it.all { c -> c in 'a'..'z' } }
+
+    /**
+     * The reachability target as `host:port`, or null when it is unusable.
+     *
+     * Kept strict on purpose. The engine parses this with `rsplit_once(':')` and
+     * falls back to port 443 on a bad port, so a typo would silently become a
+     * different target rather than an error - which is the one thing this setting
+     * must not do, since its whole job is telling a working Tor from a broken one.
+     */
+    fun sanitizedTorCheck(): String? {
+        val raw = torCheck.trim()
+        if (raw.isEmpty() || raw.any { it.isWhitespace() }) return null
+        val (host, port) = raw.rsplitPortOrNull() ?: return null
+        if (host.isEmpty() || host.length > 253) return null
+        // A bare host is legal for the engine (it assumes 443), but only allow the
+        // characters a host name or literal can contain.
+        if (!host.all { it.isLetterOrDigit() || it == '.' || it == '-' || it == ':' }) return null
+        return if (port == null) host else "$host:$port"
+    }
+
+    /** Splits a trailing `:port` off, or returns the whole string with no port. */
+    private fun String.rsplitPortOrNull(): Pair<String, Int?>? {
+        val cut = lastIndexOf(':')
+        if (cut < 0) return this to null
+        val tail = substring(cut + 1)
+        // An IPv6 literal has colons of its own and no port here.
+        val port = tail.toIntOrNull() ?: return (this to null).takeIf { count { c -> c == ':' } > 1 }
+        if (port !in 1..65_535) return null
+        return substring(0, cut) to port
+    }
+
+    fun sanitizedBridges(): List<String> = torBridgeLines
+        .split('\n', ';')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && BRIDGE_LINE.matches(it) }
+        .distinct()
+        .take(MAX_BRIDGE_LINES)
+
     /** Command-line arguments passed to the `aether` engine binary. */
     fun toArgs(): List<String> {
         val args = mutableListOf<String>()
 
-        when (protocol) {
+        // ---- Tor (engine core 2.0.0) -------------------------------------
+        //
+        // Emitted FIRST because in the `--tor-only` modes it decides that most of
+        // what follows must not be emitted at all: there is no tunnel, so there is
+        // no endpoint to scan, no transport to obfuscate and no WARP identity to
+        // provision. Sending those flags anyway would ask the engine to do work
+        // whose result nothing reads.
+        when (backend.torMode) {
+            null -> Unit
+            TorMode.CHAIN -> {
+                args += "--tor"
+                args += "--tor-bind"
+                args += "127.0.0.1:${TunnelConfig.TOR_SOCKS_PORT}"
+            }
+            TorMode.ONLY -> args += "--tor-only"
+            TorMode.REVERSE -> {
+                args += "--tor-reverse"
+                args += "--tor-bind"
+                args += "127.0.0.1:${TunnelConfig.TOR_SOCKS_PORT}"
+            }
+        }
+        if (backend.usesTor) {
+            // Bridges are only meaningful when Tor has to reach the network by
+            // itself, which is both modes where Tor faces the local network:
+            // `--tor-only` and `--tor-reverse`. In the chained mode Tor is dialled
+            // through the tunnel, so there is nothing for a bridge to hide from.
+            if (backend.torMode != TorMode.CHAIN) {
+                when (torBridges) {
+                    TorBridges.AUTO -> Unit
+                    TorBridges.ALWAYS -> args += "--tor-bridges"
+                    TorBridges.OFF -> args += "--no-tor-bridges"
+                }
+                sanitizedBridges().forEach {
+                    args += "--tor-bridge"
+                    args += it
+                }
+            }
+        }
+        if (!backend.usesWarp) {
+            // Plain Tor: the resolvers still apply (they are what the engine's own
+            // SOCKS front hands out), nothing else here does.
+            sanitizedDns().takeIf { it.isNotEmpty() }?.let {
+                args += "--dns"
+                args += it.joinToString(",")
+            }
+            return args
+        }
+
+        when (effectiveProtocol) {
             // AUTO no longer reaches the engine: Smart Auto (core/SmartAuto.kt)
             // fingerprints the network's DPI and resolves AUTO to a concrete,
             // tuned protocol BEFORE launch. Kept only for exhaustiveness.
@@ -264,6 +465,7 @@ data class ConnectionProfile(
             Protocol.MASQUE -> args += "--masque"
             Protocol.WIREGUARD -> args += "--wg"
             Protocol.GOOL -> args += "--gool"
+            Protocol.MIM -> args += "--mim"
         }
 
         // A pinned peer makes scan mode irrelevant, so only emit it otherwise.
@@ -348,7 +550,14 @@ data class ConnectionProfile(
         // http:// proxy. Forcing it here turns "connects but nothing loads"
         // into a working session the user never has to debug.
         val httpUpstream = sanitizedUpstream()?.startsWith("http://") == true
-        put("AETHER_MASQUE_HTTP2", if (masqueHttp2 || httpUpstream) "1" else "0")
+        // The reverse chain has no choice here: Tor carries TCP only, so MASQUE
+        // over HTTP/2 is the only carrier it can hold, and core 2.0.0 runs that
+        // mode over h2 regardless. Forced so the engine's carrier and the app's
+        // own reported state cannot disagree.
+        put(
+            "AETHER_MASQUE_HTTP2",
+            if (masqueHttp2 || httpUpstream || backend.torMode == TorMode.REVERSE) "1" else "0",
+        )
 
         // Which addresses the engine's scanner may consider.
         //
@@ -407,6 +616,30 @@ data class ConnectionProfile(
         if (noProfileRetry) put("AETHER_WG_NO_PROFILE_RETRY", "1")
         sanitizedTlsGroups()?.let { put("AETHER_TLS_GROUPS", it) }
         if (coreLogLevel != CoreLogLevel.WARN) put("AETHER_LOG_LEVEL", coreLogLevel.raw)
+
+        // ---- engine core 2.0.0 (1.3.0): Tor tuning ----
+        //
+        // Only sent when the backend actually runs Tor, and only when the user
+        // deviated from the engine's default. Sending them always would mean the
+        // app owns values the engine should keep owning.
+        if (backend.usesTor) {
+            sanitizedTorCheck()?.let { put("AETHER_TOR_CHECK", it) }
+            if (backend.torMode != TorMode.CHAIN) {
+                // Both only matter while Tor faces the network itself: bridgedb is
+                // not consulted in the chained mode, and the direct probe there runs
+                // inside the tunnel where it is not the thing that stalls.
+                sanitizedTorCountry()?.let { put("AETHER_TOR_COUNTRY", it) }
+                if (torDirectSecs > 0) {
+                    put("AETHER_TOR_DIRECT_SECS", torDirectSecs.coerceIn(5, 600).toString())
+                }
+            }
+            // The engine's Tor log understands info/debug/trace only, and already
+            // derives itself from AETHER_LOG_LEVEL - but only for debug and trace.
+            // At the app's DEBUG level the bootstrap detail is the point, so it is
+            // asked for explicitly; every quieter level is left to the engine, which
+            // then logs Tor at info.
+            if (coreLogLevel == CoreLogLevel.DEBUG) put("AETHER_TOR_LOG", "debug")
+        }
 
         // ---- engine v1.7.0 (1.2.6) ----
         //
@@ -537,6 +770,22 @@ data class ConnectionProfile(
         /** Hard caps so a pasted blob can't build a gigantic argv. */
         const val MAX_DNS_SERVERS = 8
         const val MAX_ROUTE_RULES = 256
+        const val MAX_BRIDGE_LINES = 12
+
+        /**
+         * One Tor bridge line: a known transport name, an address, a fingerprint
+         * and any number of `key=value` parameters.
+         *
+         * Deliberately strict about the FIRST token. A bridge line is passed to
+         * the engine as one argv entry, so nothing here can inject a second one -
+         * but a line that names a transport the app ships no binary for would fail
+         * at connect time with a message about the transport rather than about the
+         * line, which is the sort of error nobody can act on.
+         */
+        private val BRIDGE_LINE = Regex(
+            "^(?:obfs4|meek_lite|webtunnel|snowflake|scramblesuit|obfs3)\\s+[^\\s]{3,120}" +
+                "(?:\\s+[0-9A-Fa-f]{40})?(?:\\s+[A-Za-z0-9_.=/+:,\\-]{1,400})*$"
+        )
 
         /** `1.1.1.1` or `1.1.1.1:53` (IPv4, or bracketed IPv6 with a port). */
         private val DNS_ENTRY =

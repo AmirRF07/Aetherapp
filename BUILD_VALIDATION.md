@@ -191,3 +191,46 @@
 - A local Gradle compile was again NOT possible in the packaging environment (no
   Android SDK, no network, no `gradle-wrapper.jar` in the archive). CI remains the
   authoritative build. Every check that could be run without it was run.
+
+## 1.3.0 — the first revision validated by an actual build
+
+Everything below was RUN, not reasoned about. Toolchain: JDK 17.0.20, Android SDK
+platform 35 + build-tools 35.0.0, Gradle 8.9, AGP 8.7.2.
+
+- `gradle :app:compileReleaseKotlin` — **SUCCESS**. Warnings only (pre-existing
+  `FlowPreview`, `allNetworks`, three AutoMirrored icon deprecations); no errors.
+- `gradle :app:testReleaseUnitTest` — **SUCCESS, 52 tests, 0 failures, 0 skipped**:
+  `AiRedactionTest` 12, `LanGuardTest` 15, `AiModelPolicyTest` 7 and the new
+  `TorSocksWireTest` 18.
+- `gradle :app:assembleRelease` — **SUCCESS**. All three splits packaged
+  (arm64-v8a, armeabi-v7a, universal), R8 and resource shrinking included.
+- LIMIT OF THAT APK: the native inputs were absent, so it contains only the
+  dependencies' own `.so` files (`libgojni.so` from the Psiphon AAR,
+  androidx.graphics.path, datastore) and NOT `libaether.so`, the hev tunnel or
+  `libpt-lyrebird.so`. Building those needs the Rust toolchain plus NDK 26 cross
+  compilation, which CI does. The APK proves the Kotlin, the resources, R8 and
+  packaging; it is not a shippable build and was signed with a throwaway key.
+
+### The three errors that build found
+
+1. `LtrOutlinedTextField` had no `isError` parameter (the Tor reachability field
+   passed one). Fixed in the component rather than by dropping the flag: a
+   malformed `host:port` must be visible, because the engine falls back to port 443
+   on a bad port instead of failing.
+2. `TorSocksFront.readAddress` used an expression body (`= when (...)`) containing
+   `return null`, which Kotlin prohibits. Converted to a block body; the early
+   returns are the point, since a half-read address leaves the stream out of step
+   with the client for every following byte.
+3. `.github/removed-sources.txt` still listed `transport/TorSocksFront.kt` from when
+   1.2.7 deleted it. 1.3.0 brings that path back, so the purge step deleted the new
+   file, the CI commit step pushed the deletion to `main`, and the compile then
+   failed with `Unresolved reference 'TorSocksFront'` in `AetherVpnService` — a
+   source tree that looked broken while the only broken thing was the manifest.
+   The line is gone and `scripts/purge-stale-sources.sh` now refuses to delete any
+   listed Kotlin file whose name the current sources still reference, naming the
+   line to remove instead.
+
+WARNING for anyone updating an existing checkout of this repo: if a previous CI run
+committed that deletion, the branch no longer contains
+`app/src/main/java/studio/cluvex/aether/transport/TorSocksFront.kt`. Push the file
+and the manifest fix together, or the next build repeats the deletion.

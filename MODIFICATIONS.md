@@ -35,6 +35,37 @@
   text, capability-based enablement.
 - `scripts/build-tor.sh` and its release-workflow step: **deleted**.
 
+
+## 1.3.0 additions (engine core 2.0.0)
+
+- `transport/TorSocksWire.kt`: the byte-level SOCKS5 UDP and DNS-over-TCP framing,
+  pure and total, with `app/src/test/.../TorSocksWireTest.kt` behind it. Split out of
+  the front so the one part of the Tor path that fails invisibly can be tested at
+  all; `TorSocksFront` keeps the sockets, threads and counters.
+- `transport/TorCountries.kt`: the short bridge-country list for bridgedb, separate
+  from `ExitRegions` because it answers the opposite question.
+- `model/Profile.kt`: `torCountry`, `torDirectSecs` and `torCheck` with strict
+  sanitizers, emitted into `toEnv()` only when Tor runs and only when they differ
+  from the engine's defaults.
+- `model/TransportBackend.kt`: six modes and `TorMode` (CHAIN/ONLY/REVERSE); every port and pipeline
+  decision is a computed property of the backend, so no caller can pair a mode with
+  the wrong port.
+- `transport/TorSocksFront.kt` (new): the UDP-capable SOCKS front Tor needs on
+  Android. See the file header for why a Tor listener cannot be handed to
+  hev-socks5-tunnel directly.
+- `core/TunnelConfig.kt`: `TOR_SOCKS_PORT` 1820, `TOR_FRONT_PORT` 1821.
+- `model/Profile.kt`: `Protocol.MIM`, `TorBridges`, `torBridgeLines` +
+  `sanitizedBridges()`; `toArgs()` emits the Tor flags first and returns early in
+  `--tor-only`, where the WARP flags describe work nothing would read.
+- `core/AetherProcess.kt`: Tor directory cache and pluggable-transport paths.
+- `vpn/AetherVpnService.kt`: `connectTor()`, the Tor bootstrap budget, the stage
+  backend fix, and the front's teardown ordering.
+- `transport/ExternalTransport.kt`: Psiphon's upstream port follows the backend.
+- `ai/AiPatch.kt`, `ai/AiTopic.kt`, `ai/AiGate.kt`: Tor as read-only AI context.
+- `scripts/build-natives.sh`, `.github/workflows/build.yml`: `--features tor`,
+  binary verification, and the lyrebird target.
+
+
 ## UI map (home screen and connection card)
 
 - `ui/components/GlowCycle.kt` (new): the shared travelling-light engine. One

@@ -17,6 +17,7 @@ import studio.cluvex.aether.model.Protocol
 import studio.cluvex.aether.model.ScanMode
 import studio.cluvex.aether.model.SplitMode
 import studio.cluvex.aether.model.TeamAuth
+import studio.cluvex.aether.model.TorBridges
 import studio.cluvex.aether.model.TransportBackend
 
 private val Context.dataStore by preferencesDataStore(name = "aether_profile")
@@ -25,6 +26,12 @@ private val Context.dataStore by preferencesDataStore(name = "aether_profile")
 class ProfileStore(private val context: Context) {
     private object Keys {
         val backend = stringPreferencesKey("transportBackend")
+        // Added in 1.3.0 (engine core 2.0.0: Tor)
+        val torBridges = stringPreferencesKey("torBridges")
+        val torBridgeLines = stringPreferencesKey("torBridgeLines")
+        val torCountry = stringPreferencesKey("torCountry")
+        val torDirectSecs = intPreferencesKey("torDirectSecs")
+        val torCheck = stringPreferencesKey("torCheck")
         val exitRegion = stringPreferencesKey("exitRegion")
         val protocol = stringPreferencesKey("protocol")
         val scan = stringPreferencesKey("scan")
@@ -95,6 +102,12 @@ class ProfileStore(private val context: Context) {
             // instead of silently re-routing through a different provider.
             backend = TransportBackend.fromStoredName(prefs[Keys.backend]) ?: TransportBackend.AETHER,
             exitRegion = prefs[Keys.exitRegion] ?: "",
+            torBridges = prefs[Keys.torBridges]
+                ?.let { runCatching { TorBridges.valueOf(it) }.getOrNull() } ?: TorBridges.AUTO,
+            torBridgeLines = prefs[Keys.torBridgeLines] ?: "",
+            torCountry = prefs[Keys.torCountry] ?: "",
+            torDirectSecs = prefs[Keys.torDirectSecs] ?: 0,
+            torCheck = prefs[Keys.torCheck] ?: "",
             protocol = prefs[Keys.protocol]
                 ?.let { runCatching { Protocol.valueOf(it) }.getOrNull() } ?: Protocol.AUTO,
             scanMode = prefs[Keys.scan]
@@ -130,7 +143,9 @@ class ProfileStore(private val context: Context) {
             gateway = prefs[Keys.gateway] ?: false,
             routeBlock = prefs[Keys.routeBlock] ?: "",
             routeDirect = prefs[Keys.routeDirect] ?: "",
-            killSwitch = prefs[Keys.killSwitch] ?: false,
+            // AUDIT F-2: default ON. Only applies when the key was never written,
+            // so an explicit user "off" (which writes false) survives the update.
+            killSwitch = prefs[Keys.killSwitch] ?: true,
             strictKillSwitch = prefs[Keys.strictKillSwitch] ?: false,
             ipv6LeakProtection = prefs[Keys.ipv6Leak] ?: true,
             smartReconnect = prefs[Keys.smartReconnect] ?: true,
@@ -160,6 +175,11 @@ class ProfileStore(private val context: Context) {
         context.dataStore.edit { prefs ->
             prefs[Keys.backend] = profile.backend.name
             prefs[Keys.exitRegion] = profile.exitRegion.uppercase()
+            prefs[Keys.torBridges] = profile.torBridges.name
+            prefs[Keys.torBridgeLines] = profile.torBridgeLines
+            prefs[Keys.torCountry] = profile.torCountry
+            prefs[Keys.torDirectSecs] = profile.torDirectSecs
+            prefs[Keys.torCheck] = profile.torCheck
             prefs[Keys.protocol] = profile.protocol.name
             prefs[Keys.scan] = profile.scanMode.name
             prefs[Keys.ip] = profile.ipVersion.name

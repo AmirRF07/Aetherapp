@@ -12,6 +12,7 @@ import studio.cluvex.aether.core.IdentityVault
 import studio.cluvex.aether.core.SignerIdentity
 import studio.cluvex.aether.data.LanguagePrefs
 import studio.cluvex.aether.data.ShareCredentials
+import studio.cluvex.aether.vpn.AetherVpnService
 import java.io.File
 import kotlin.concurrent.thread
 
@@ -109,6 +110,52 @@ class AetherApp : Application() {
                     "Thread: ${thread.name}\n\n" + Log.getStackTraceString(throwable),
                 )
             }
+
+            // THE ONE EXCEPTION WORTH SURVIVING (1.3.0-r2).
+            //
+            // android.app.ForegroundServiceDidNotStartInTimeException is not a bug
+            // in the code that happens to be running - it is the framework's
+            // 10-second penalty for a startForegroundService() request that was
+            // never answered with startForeground(). Nothing in the process is
+            // corrupt when it arrives, and killing the app while a VPN tunnel is up
+            // is strictly worse than the missing notification it complains about:
+            // that is the "the app suddenly closed" the 1.3.0 field report
+            // describes, and every disconnect used to trigger it.
+            //
+            // The cause is fixed in AetherVpnService.onStartCommand, which now
+            // promotes the service for EVERY action. This is the net underneath:
+            // post the notification the framework was waiting for, and only carry
+            // on dying if that does not work. Matched by NAME, not by type, because
+            // the class is not public API on every release the app supports.
+            //
+            // Deliberately narrow: no other Throwable is swallowed here. A real bug
+            // still ends the process and still shows the crash report on the next
+            // start, because a process that keeps running on top of broken state is
+            // how a VPN app leaks traffic.
+            if (throwable.javaClass.name.contains("ForegroundServiceDidNotStartInTime")) {
+                val service = AetherVpnService.live
+                val rescued = service != null && runCatching { service.rescueForeground() }
+                    .getOrDefault(false)
+                if (rescued) {
+                    runCatching {
+                        DiagnosticsLog.w(
+                            "crash",
+                            "The system reported a missing startForeground() for the VPN " +
+                                "service. The notification has been posted now and the " +
+                                "session was NOT torn down - the tunnel keeps running. " +
+                                "This is survivable and is not a tunnel fault.",
+                        )
+                    }
+                    runCatching { File(filesDir, CRASH_FILE).delete() }
+                    return@setDefaultUncaughtExceptionHandler
+                }
+            }
+
+            // Every other fatal exception: make sure a dying app does not leave a
+            // live engine child process (and with it a half-open tunnel) behind.
+            // Bounded, best-effort, and it can never itself throw.
+            runCatching { AetherVpnService.live?.killNativesFromCrashHandler() }
+
             previous?.uncaughtException(thread, throwable)
         }
     }

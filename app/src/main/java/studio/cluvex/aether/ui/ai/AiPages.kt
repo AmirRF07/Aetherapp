@@ -52,6 +52,7 @@ import studio.cluvex.aether.data.LanguagePrefs
 import studio.cluvex.aether.model.ConnectionProfile
 import studio.cluvex.aether.model.ConnectionState
 import studio.cluvex.aether.ui.components.LtrOutlinedTextField
+import studio.cluvex.aether.ui.components.SecureSurface
 import studio.cluvex.aether.ui.settings.GroupCaption
 import studio.cluvex.aether.ui.settings.GroupFooter
 import studio.cluvex.aether.ui.settings.RowDivider
@@ -102,6 +103,11 @@ fun AiSettingsPage(
     val keyText = draft ?: settings.apiKey
 
     val forgotten = stringResource(R.string.ai_key_forgotten)
+
+    // AUDIT F-3: the Gemini API key lives on this page, and the reveal toggle
+    // below puts it on screen in the clear. Blocks screenshots, screen recording
+    // and the recents thumbnail for as long as the page is composed.
+    SecureSurface()
 
     SettingsScaffold(stringResource(R.string.ai_title), onBack, modifier) {
         if (!gate.ready) {

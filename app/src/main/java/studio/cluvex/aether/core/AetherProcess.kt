@@ -43,6 +43,42 @@ class AetherProcess(
             putAll(profile.toEnv())
             put("HOME", workingDir.absolutePath)
             put("TMPDIR", workingDir.absolutePath)
+            // ---- Tor (engine core 2.0.0) ---------------------------------
+            //
+            // Two paths the engine cannot work out for itself on Android, so they
+            // are handed over here rather than guessed at in the engine:
+            //
+            //  * the directory cache. Tor downloads a consensus and remembers its
+            //    guards; without a writable, PERSISTENT directory it would
+            //    bootstrap from nothing on every connect, which is the slow first
+            //    start users read as a hang.
+            //  * the pluggable transports. On Android the only files that may be
+            //    executed are the ones packaged in jniLibs, so lyrebird ships as
+            //    `libpt-lyrebird.so` and is named explicitly. Without this the
+            //    engine searches PATH and the usual system directories, none of
+            //    which exist here, and a bridged connect would fail with nothing
+            //    to point at.
+            if (profile.backend.usesTor) {
+                val torDir = File(workingDir, "tor").apply { mkdirs() }
+                put("AETHER_TOR_DIR", torDir.absolutePath)
+                put("AETHER_TOR_PT_DIR", nativeLibDir)
+                val lyrebird = File(nativeLibDir, "libpt-lyrebird.so")
+                if (lyrebird.exists()) {
+                    // `name=path`, the form core 2.0.0's --tor-pt documents. One
+                    // binary serves obfs4, meek_lite and webtunnel.
+                    put(
+                        "AETHER_TOR_PT",
+                        listOf("obfs4", "meek_lite", "webtunnel")
+                            .joinToString(";") { "$it=${lyrebird.absolutePath}" },
+                    )
+                } else {
+                    DiagnosticsLog.w(
+                        "engine",
+                        "No libpt-lyrebird.so in this APK: Tor can still connect directly " +
+                            "and through the tunnel, but bridges have no transport to run.",
+                    )
+                }
+            }
         }
 
         val proc = builder.start()
@@ -53,6 +89,9 @@ class AetherProcess(
         // log identifies itself even if the engine dies immediately.
         BuildProvenance.logApkIdentity()
         DiagnosticsLog.i("engine", "Spawned ${bin.name} ${redactArgs(profile.toArgs())}")
+        // A new engine means a new bootstrap: the previous run's percentage must
+        // not make this one look like it is already progressing.
+        TorBootstrap.reset()
         // Drain stdout/stderr so a full pipe never blocks the engine, mirroring
         // every line into both logcat and the in-app diagnostics panel.
         Thread({
@@ -69,6 +108,11 @@ class AetherProcess(
                         // Desktop-parity info row: pick out the endpoint the
                         // engine selected (no-op for every other line).
                         EngineMeta.ingest(it)
+                        // Tor bootstrap percentage. Without this the app has no
+                        // way to tell "Tor is still working" from "Tor is being
+                        // blocked", and 1.3.0 shipped a stage gate that assumed
+                        // the worse of the two after four seconds.
+                        TorBootstrap.ingest(it)
                         // Cross-check the engine's build stamp against this
                         // APK's. See [BuildProvenance] for the r4 round this
                         // single line would have saved.

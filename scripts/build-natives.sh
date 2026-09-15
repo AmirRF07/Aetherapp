@@ -10,11 +10,17 @@
 #                    Java_* symbols TProxyService.kt declares. Runs the tunnel
 #                    IN-PROCESS (the VpnService TUN fd is per-process) on a
 #                    native pthread the bridge creates itself.
-#   libaether.so  <- the Aether engine, cross-compiled from Rust with cargo-ndk.
+#   libaether.so  <- the Aether engine, cross-compiled from Rust with cargo-ndk,
+#                    with the `tor` cargo feature ON (see AETHER_FEATURES).
+#   libpt-lyrebird.so <- the obfs4/meek_lite/webtunnel pluggable transport, only
+#                    needed for Tor BRIDGES. Optional: skipped with a warning when
+#                    no Go toolchain is present, and the app degrades to Tor
+#                    without bridges (it says so in the log).
 #
-# Usage:  build-natives.sh [hev|aether|all]   (default: all)
+# Usage:  build-natives.sh [hev|aether|pt|all]   (default: all)
 #
 # Requires: ANDROID_NDK_HOME, rustup android targets, cargo-ndk.
+#           `pt` additionally needs Go >= 1.21.
 # Run scripts/fetch-natives.sh first.
 set -euo pipefail
 
@@ -29,6 +35,33 @@ JNI_DIR="${PROJECT_DIR}/app/src/main/jniLibs"
 
 API="${ANDROID_API:-26}"
 ABIS=("arm64-v8a" "armeabi-v7a")
+
+# ============================================================================
+# 1.3.0: THE ENGINE MUST BE BUILT WITH `--features tor`.
+#
+# Core 2.0.0's Cargo.toml declares `default = []` and puts every Tor dependency
+# (arti-client, tor-chanmgr, tor-rtcompat, tokio-util, liblzma) behind an opt-in
+# `tor` feature. A build without it is not a build with Tor switched off - it is
+# a binary in which the Tor code does not exist. `--tor`, `--tor-only` and
+# `--tor-bind` are then unknown arguments, and the app's three Tor modes fail at
+# connect time with an engine that exits immediately.
+#
+# That failure is indistinguishable, from the app's side, from a blocked network:
+# the engine dies before it opens its port, which is exactly what a censored
+# connection looks like. So it would be diagnosed as a network problem, on a
+# device, by someone who cannot see this file. Hence: not a default the caller may
+# forget, but a variable with the feature already in it.
+#
+# Cost of the feature: roughly 6-8 MB per ABI and a noticeably longer build. That
+# is the price of shipping Tor and it is paid deliberately.
+# ============================================================================
+AETHER_FEATURES="${AETHER_FEATURES:-tor}"
+
+# Where the pluggable transport comes from. Pinned by commit, not by tag: a tag
+# can be moved, and this binary is one of the things standing between a user and
+# a network that watches them.
+LYREBIRD_REPO="${LYREBIRD_REPO:-https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird.git}"
+LYREBIRD_REF="${LYREBIRD_REF:-lyrebird-0.6.1}"
 
 if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "${ANDROID_NDK_HOME}" ]; then
   echo "ERROR: ANDROID_NDK_HOME is not set or does not exist." >&2
@@ -336,7 +369,16 @@ build_aether() {
   build_aether_abi() {
     local abi="$1" triple="$2"
     echo "==> [aether] building for ${abi} (${triple}, API ${API})"
-    ( cd "${crate}" && ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}" cargo ndk -t "${abi}" --platform "${API}" build --release )
+    local feature_args=()
+    if [ -n "${AETHER_FEATURES}" ]; then
+      feature_args=(--features "${AETHER_FEATURES}")
+      echo "    cargo features: ${AETHER_FEATURES}"
+    else
+      # Reachable only when a caller sets AETHER_FEATURES="" on purpose. Loud,
+      # because the resulting APK looks complete and has no Tor in it.
+      echo "    WARNING: building WITHOUT cargo features - the app's Tor modes will NOT work." >&2
+    fi
+    ( cd "${crate}" && ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}" cargo ndk -t "${abi}" --platform "${API}" build --release "${feature_args[@]}" )
 
     local reldir="${CARGO_TARGET_DIR}/${triple}/release"
     local artifact=""
@@ -363,13 +405,88 @@ build_aether() {
 
   build_aether_abi "arm64-v8a"   "aarch64-linux-android"
   build_aether_abi "armeabi-v7a" "armv7-linux-androideabi"
+
+  # Prove Tor is IN the binary rather than trusting that the flag was honoured.
+  # `--tor-bind` is a string the Tor module owns, so it is absent from a build
+  # made without the feature - and grepping for it is the only check here that
+  # cannot be satisfied by a stale artifact.
+  if [ -n "${AETHER_FEATURES}" ] && [[ "${AETHER_FEATURES}" == *tor* ]]; then
+    local abi
+    for abi in "${ABIS[@]}"; do
+      if strings -a "${JNI_DIR}/${abi}/libaether.so" 2>/dev/null | grep -q -- '--tor-bind'; then
+        echo "    [${abi}] tor feature verified in the binary."
+      else
+        echo "ERROR: ${abi}/libaether.so contains no Tor support although --features ${AETHER_FEATURES}" >&2
+        echo "       was requested. Refusing to ship an APK whose Tor modes cannot work." >&2
+        exit 1
+      fi
+    done
+  fi
+}
+
+# ============================================================================
+# build_pt: the pluggable transport for Tor bridges.
+#
+# Only bridges need this. Plain Tor and `Aether -> Tor` work without it, which is
+# why a missing Go toolchain is a warning and not an error - and why the app logs
+# the absence instead of hiding it.
+#
+# Two Android-specific details decide the whole recipe:
+#
+#  * The file MUST be named `lib*.so` and live in jniLibs. Android extracts only
+#    those from an APK onto a path that permits execution; anything else lands in
+#    the asset area, which is mounted noexec on modern Android. A correctly built
+#    transport under any other name is a file the engine cannot start.
+#  * It must be a position-independent executable (`-buildmode=pie`). It is
+#    spawned as a process, not dlopen'd, and since API 21 the loader refuses a
+#    non-PIE executable.
+# ============================================================================
+build_pt() {
+  if ! command -v go >/dev/null 2>&1; then
+    echo "==> [pt] Go toolchain not found - SKIPPING lyrebird." >&2
+    echo "    Tor still works (directly and through the tunnel). Tor BRIDGES will not:" >&2
+    echo "    the app logs 'no libpt-lyrebird.so in this APK' and carries on." >&2
+    return 0
+  fi
+
+  local src="${NATIVE_DIR}/lyrebird"
+  if [ ! -d "${src}/.git" ]; then
+    echo "==> [pt] cloning lyrebird ${LYREBIRD_REF}"
+    rm -rf "${src}"
+    git clone --quiet --depth 1 --branch "${LYREBIRD_REF}" "${LYREBIRD_REPO}" "${src}"
+  fi
+  echo "    lyrebird revision: $(cd "${src}" && git rev-parse --short HEAD)"
+
+  build_pt_abi() {
+    local abi="$1" goarch="$2" cc_prefix="$3"
+    local cc="${NDK_TOOLCHAIN}/${cc_prefix}${API}-clang"
+    if [ ! -x "${cc}" ]; then
+      echo "ERROR: no NDK compiler at ${cc}" >&2
+      exit 1
+    fi
+    echo "==> [pt] building lyrebird for ${abi} (${goarch})"
+    mkdir -p "${JNI_DIR}/${abi}"
+    (
+      cd "${src}"
+      CGO_ENABLED=1 GOOS=android GOARCH="${goarch}" CC="${cc}" \
+        go build -trimpath -buildmode=pie \
+          -ldflags "-s -w" \
+          -o "${JNI_DIR}/${abi}/libpt-lyrebird.so" \
+          ./cmd/lyrebird
+    )
+    echo "    installed libpt-lyrebird.so for ${abi}"
+  }
+
+  build_pt_abi "arm64-v8a"   "arm64" "aarch64-linux-android"
+  build_pt_abi "armeabi-v7a" "arm"   "armv7a-linux-androideabi"
 }
 
 case "${TARGET}" in
   hev)    build_hev ;;
   aether) build_aether ;;
-  all)    build_hev; build_aether ;;
-  *) echo "Usage: build-natives.sh [hev|aether|all]" >&2; exit 2 ;;
+  pt)     build_pt ;;
+  all)    build_hev; build_aether; build_pt ;;
+  *) echo "Usage: build-natives.sh [hev|aether|pt|all]" >&2; exit 2 ;;
 esac
 
 echo "==> Done (${TARGET}). Installed libs:"

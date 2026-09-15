@@ -37,13 +37,89 @@ enum class AiTopic(
     BACKEND(
         "backend",
         "Network backend",
-        "Chooses the network stack. 'Aether' is one hop through the bundled " +
-            "Aether/WARP engine (fastest). 'Aether -> Psiphon' brings Aether up first " +
-            "as a local SOCKS5 proxy and dials Psiphon through it, so the public exit " +
-            "IP belongs to Psiphon while the only leg a local censor sees is Aether's " +
-            "obfuscated transport. Sites that block Cloudflare WARP addresses work in " +
-            "the chained mode.",
+        "Chooses the network stack, and with it the address the internet sees. " +
+            "'Aether' is one hop through the bundled Aether/WARP engine (fastest, " +
+            "exit = a Cloudflare WARP address). 'Aether -> Psiphon' brings Aether up " +
+            "first as a local SOCKS5 proxy and dials Psiphon through it, so the exit " +
+            "belongs to Psiphon while the only leg a local censor sees is Aether's " +
+            "obfuscated transport; sites and AI services that refuse WARP addresses " +
+            "work in this mode. The three Tor modes use the Tor implementation built " +
+            "into the engine: 'Aether -> Tor' carries Tor inside the tunnel, so a " +
+            "network that blocks Tor never sees it and the exit is a Tor exit node - " +
+            "this is the Tor mode to choose on a censored network. 'Tor' is Tor alone, " +
+            "which has to reach the Tor network by itself and uses bridges when it is " +
+            "blocked. 'Tor -> Psiphon' dials Psiphon through Tor, so the exit is a " +
+            "Psiphon address reached from a Tor one. 'Tor -> Aether' is the reverse " +
+            "chain: Tor first, the tunnel built inside it, so the exit is a WARP address " +
+            "like plain Aether while the local network sees only Tor and cannot tell a " +
+            "VPN is in use - the mode for a network that blocks or throttles " +
+            "Cloudflare/WARP itself while Tor still gets through. It is fixed to MASQUE " +
+            "over HTTP/2, because Tor carries TCP only and WARP's WireGuard endpoints " +
+            "answer on UDP alone. Every Tor mode is slower than the others by design. In " +
+            "the two modes whose EXIT is Tor the app answers DNS over TCP inside Tor and " +
+            "drops other UDP, including QUIC, which apps retry over TCP; the reverse " +
+            "chain carries normal UDP, because the device's traffic travels inside the " +
+            "WARP tunnel.",
         "backend",
+    ),
+    TOR_BRIDGES(
+        "torBridges",
+        "Tor bridges",
+        "How Tor reaches the Tor network when it has to do so by itself, which is " +
+            "the case in every mode except 'Aether -> Tor': so in 'Tor', " +
+            "'Tor -> Psiphon' and the reverse chain 'Tor -> Aether'. Automatic tries a direct " +
+            "connection briefly and then asks bridgedb for bridges suited to the " +
+            "country you appear to be in, running them through the obfs4/webtunnel " +
+            "transport shipped in the app - nothing to paste in, no CAPTCHA. Always " +
+            "skips the direct attempt, which is faster on a network already known to " +
+            "block Tor. Off never uses bridges. In 'Aether -> Tor' this setting does " +
+            "nothing, because Tor is dialled through the tunnel and the local network " +
+            "never sees it.",
+        "torBridges",
+    ),
+    TOR_COUNTRY(
+        "torCountry",
+        "Which country bridgedb should hand out bridges for, when Tor asks it for " +
+            "some. Left blank the engine works it out by asking Cloudflare where it " +
+            "is - which is exactly the request that fails, or answers wrongly, on the " +
+            "networks where bridges are needed in the first place. Naming your country " +
+            "skips that guess and asks for bridges that are known to work there. Two " +
+            "letters, like 'ir' or 'ru'. It changes nothing in 'Aether -> Tor', where " +
+            "Tor is dialled through the tunnel and needs no bridge at all.",
+        "torCountry",
+    ),
+    TOR_DIRECT_SECS(
+        "torDirectSecs",
+        "How long Tor tries to reach the network plainly before it falls back to " +
+            "bridges, in seconds. 'Automatic' leaves the engine's 75 seconds alone, " +
+            "which is right when you do not know whether Tor is blocked where you are. " +
+            "Shorten it when you know it is blocked: those seconds are then spent " +
+            "waiting for something that cannot work. Lengthen it on a network that is " +
+            "merely slow, where a direct connection would succeed if it were given the " +
+            "time - a direct Tor connection is faster and simpler than a bridge.",
+        "torDirectSecs",
+    ),
+    TOR_CHECK(
+        "torCheck",
+        "The address Tor must be able to reach before the app accepts that the " +
+            "bootstrap worked. The engine's default is check.torproject.org, which is " +
+            "itself blocked on some networks - and then a perfectly good Tor circuit " +
+            "fails this one test and the app reports a bootstrap failure for something " +
+            "that was working. If you see that, point this at any ordinary host:port " +
+            "you know is up. It is a reachability test, not a privacy setting: the " +
+            "connection to it runs through Tor like everything else.",
+        "torCheck",
+    ),
+    TOR_BRIDGE_LINES(
+        "torBridgeLines",
+        "Own bridge lines",
+        "Bridge lines you obtained yourself, one per line, used instead of the ones " +
+            "the app fetches. The format is the one bridges.torproject.org hands out, " +
+            "e.g. 'obfs4 192.0.2.55:38114 <FINGERPRINT> cert=... iat-mode=0'. A line " +
+            "whose first word is not a transport the app ships (obfs4, meek_lite, " +
+            "webtunnel, snowflake) is ignored rather than passed on. Leave empty " +
+            "unless you have a bridge that is known to work on your network.",
+        "torBridgeLines",
     ),
     EXIT_REGION(
         "exitRegion",
@@ -58,8 +134,14 @@ enum class AiTopic(
         "Protocol",
         "The transport the Aether engine uses: Smart (tries strategies and keeps what " +
             "works), MASQUE (QUIC/HTTP-based, usually best through DPI), WireGuard " +
-            "(fastest when it is not blocked) and WARP*2/gool (WARP inside WARP - two " +
-            "hops, slower, works on networks where one hop does not).",
+            "(fastest when it is not blocked), WARP*2/gool (WARP inside WARP - two " +
+            "hops, slower, works on networks where one hop does not) and MASQUE*2/mim " +
+            "(two MASQUE hops, new in engine core 2.0.0, for an exit address in a " +
+            "different range than a single hop gives). In the 'Tor' and " +
+            "'Tor -> Psiphon' modes this setting does nothing: those bring up no WARP " +
+            "tunnel at all. In 'Tor -> Aether' it is overridden to MASQUE over HTTP/2, " +
+            "which is the only carrier Tor can hold - the engine refuses WireGuard and " +
+            "WARP*2 through Tor.",
         "protocol",
     ),
     SCAN_MODE(

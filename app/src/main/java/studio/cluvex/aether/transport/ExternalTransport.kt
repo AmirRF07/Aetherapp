@@ -33,7 +33,14 @@ object ExternalTransportFactory {
      * `Aether -> Psiphon` connected and unable to open a single site.
      */
     fun create(service: VpnService, profile: ConnectionProfile): ExternalTransport {
-        val upstream = "socks5://${TunnelConfig.SOCKS_HOST}:${TunnelConfig.SOCKS_PORT}"
+        // Which local proxy Psiphon dials THROUGH. In `Aether -> Psiphon` that is
+        // the engine's WARP listener; in `Tor -> Psiphon` it is the engine's Tor
+        // listener, which in `--tor-only` mode happens to be the same port.
+        // Derived from the backend rather than hard-coded, because this is the one
+        // mistake in this file that would be invisible: the session would connect
+        // and only the exit address would be wrong.
+        val upstreamPort = profile.backend.torSocksPort ?: TunnelConfig.SOCKS_PORT
+        val upstream = "socks5://${TunnelConfig.SOCKS_HOST}:$upstreamPort"
 
         return when (profile.backend.externalKind) {
             ExternalKind.PSIPHON -> PsiphonTransport(

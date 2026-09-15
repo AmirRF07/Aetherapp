@@ -55,6 +55,8 @@ import studio.cluvex.aether.data.ShareCredentials
 import studio.cluvex.aether.model.ConnectionProfile
 import studio.cluvex.aether.model.ConnectionState
 import studio.cluvex.aether.model.isConnected
+import studio.cluvex.aether.ui.components.SecureSurface
+import studio.cluvex.aether.ui.components.copySensitive
 
 /**
  * Collapsible "Share VPN" card in the drawer.
@@ -198,6 +200,10 @@ fun SharePanel(
                         !profile.lanShare -> Unit
                         lanIp == null -> InfoText(stringResource(R.string.share_need_wifi))
                         shareActive -> {
+                            // AUDIT F-3: the proxy credential below is on screen from
+                            // here on, so the window is screenshot-/recents-blind for
+                            // as long as this branch is composed.
+                            SecureSurface()
                             InfoText(stringResource(R.string.share_howto))
                             Spacer(Modifier.height(8.dp))
                             EndpointRow(
@@ -222,10 +228,12 @@ fun SharePanel(
                             EndpointRow(
                                 label = stringResource(R.string.share_user_label),
                                 value = proxyUser,
+                                sensitive = true,
                             )
                             EndpointRow(
                                 label = stringResource(R.string.share_pass_label),
                                 value = proxyPassword,
+                                sensitive = true,
                             )
                             TextButton(
                                 onClick = {
@@ -272,7 +280,7 @@ private fun InfoText(text: String) {
 }
 
 @Composable
-private fun EndpointRow(label: String, value: String) {
+private fun EndpointRow(label: String, value: String, sensitive: Boolean = false) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     Row(
@@ -299,7 +307,15 @@ private fun EndpointRow(label: String, value: String) {
         }
         IconButton(
             onClick = {
-                clipboard.setText(AnnotatedString(value))
+                // AUDIT F-4: the credential rows go to the clipboard flagged
+                // sensitive, so Android 13+ keeps the value out of the paste
+                // preview and clipboard history. The two ip:port rows are not a
+                // secret and stay a plain copy.
+                if (sensitive) {
+                    copySensitive(context, value, label)
+                } else {
+                    clipboard.setText(AnnotatedString(value))
+                }
                 Toast.makeText(context, R.string.share_copied, Toast.LENGTH_SHORT).show()
             },
         ) {

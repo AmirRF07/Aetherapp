@@ -66,6 +66,14 @@ fun LtrOutlinedTextField(
     label: @Composable (() -> Unit)? = null,
     placeholder: @Composable (() -> Unit)? = null,
     supportingText: @Composable (() -> Unit)? = null,
+    /**
+     * Added in 1.3.0: a technical field whose value the engine would silently
+     * reinterpret needs to be able to say so. The Tor reachability check is the
+     * first: the engine parses `host:port` and falls back to port 443 on a bad
+     * port, so a typo becomes a DIFFERENT target rather than an error - and that
+     * setting exists precisely to tell a working Tor from a broken one.
+     */
+    isError: Boolean = false,
     keyboardType: KeyboardType = KeyboardType.Ascii,
     // Added in 1.2.3: lets Zero Trust secrets be masked while still getting the
     // LTR/BiDi handling every technical field in this app needs.
@@ -98,6 +106,7 @@ fun LtrOutlinedTextField(
             label = label,
             placeholder = placeholder,
             supportingText = supportingText,
+            isError = isError,
             interactionSource = interactionSource,
             visualTransformation = visualTransformation,
             keyboardOptions = KeyboardOptions(keyboardType = keyboardType),

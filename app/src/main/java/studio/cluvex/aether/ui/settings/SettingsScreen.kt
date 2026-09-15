@@ -23,6 +23,7 @@ import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.VpnKey
 import androidx.compose.material.icons.rounded.Wifi
@@ -64,8 +65,11 @@ import studio.cluvex.aether.model.Protocol
 import studio.cluvex.aether.model.ScanMode
 import studio.cluvex.aether.model.SplitMode
 import studio.cluvex.aether.model.TeamAuth
+import studio.cluvex.aether.model.TorBridges
+import studio.cluvex.aether.model.TorMode
 import studio.cluvex.aether.model.TransportBackend
 import studio.cluvex.aether.transport.ExitRegions
+import studio.cluvex.aether.transport.TorCountries
 import studio.cluvex.aether.ui.AboutPanel
 import studio.cluvex.aether.ui.SharePanel
 import studio.cluvex.aether.ui.ai.AiAdvisorPage
@@ -77,6 +81,7 @@ import studio.cluvex.aether.ui.components.AppPickerDialog
 import studio.cluvex.aether.ui.components.DiagnosticsPanel
 import studio.cluvex.aether.ui.components.LtrOutlinedTextField
 import studio.cluvex.aether.ui.components.SegmentedSelector
+import studio.cluvex.aether.ui.components.SecureSurface
 
 /**
  * Every screen the settings area can show.
@@ -489,14 +494,121 @@ private fun ConnectionPage(
                 label = { ExitRegions.label(it) },
                 onSelect = { onProfileChange(profile.copy(exitRegion = it)) },
                 enabled = editable && profile.backend.usesExternal,
-                summary = when (profile.backend.externalKind) {
-                    null -> stringResource(R.string.exit_help_aether)
-                    ExternalKind.PSIPHON -> stringResource(R.string.exit_help_psiphon)
+                summary = when {
+                    // Tor picks its own exit country, per circuit, and there is no
+                    // setting anywhere that changes that. Saying so is better than
+                    // a greyed-out row with a sentence about Aether next to it.
+                    profile.backend.needsTorFront -> stringResource(R.string.exit_help_tor)
+                    profile.backend.externalKind == ExternalKind.PSIPHON ->
+                        stringResource(R.string.exit_help_psiphon)
+                    else -> stringResource(R.string.exit_help_aether)
                 },
                 aiTopic = AiTopic.EXIT_REGION,
             )
         }
         GroupFooter(backendHelp(profile.backend))
+    }
+
+    // ---- Tor (engine core 2.0.0) -------------------------------------------
+    //
+    // Shown only when the chosen mode actually contains Tor. A settings group that
+    // does nothing is worse than a missing one: it invites the user to change
+    // something and then silently ignores it.
+    if (profile.backend.usesTor) {
+        settingsSection {
+            GroupCaption(stringResource(R.string.section_tor))
+            SettingsGroup {
+                SettingsChoiceRow(
+                    title = stringResource(R.string.tor_bridges_title),
+                    icon = Icons.Rounded.Dns,
+                    options = TorBridges.entries,
+                    selected = profile.torBridges,
+                    label = { torBridgesLabel(it) },
+                    onSelect = { onProfileChange(profile.copy(torBridges = it)) },
+                    // In `Aether -> Tor` the guards are dialled through the tunnel,
+                    // so the local network never sees Tor and a bridge has nothing
+                    // to hide from. The row is disabled rather than hidden, because
+                    // the reason is worth reading.
+                    enabled = editable && profile.backend.torMode != TorMode.CHAIN,
+                    summary = if (profile.backend.torMode != TorMode.CHAIN) {
+                        stringResource(R.string.tor_bridges_desc)
+                    } else {
+                        stringResource(R.string.tor_bridges_not_needed)
+                    },
+                    aiTopic = AiTopic.TOR_BRIDGES,
+                )
+                if (profile.backend.torMode != TorMode.CHAIN) {
+                    RowDivider(inset = false)
+                    SettingsChoiceRow(
+                        title = stringResource(R.string.tor_country_title),
+                        icon = Icons.Rounded.Public,
+                        // Blank means "let the engine detect it"; the rest are the
+                        // countries where a bridge is most often the only way in.
+                        options = TorCountries.values,
+                        selected = profile.torCountry.trim().lowercase()
+                            .takeIf { TorCountries.isOffered(it) } ?: "",
+                        label = { torCountryLabel(it) },
+                        onSelect = { onProfileChange(profile.copy(torCountry = it)) },
+                        summary = stringResource(R.string.tor_country_desc),
+                        enabled = editable,
+                        aiTopic = AiTopic.TOR_COUNTRY,
+                    )
+                    RowDivider(inset = false)
+                    SettingsChoiceRow(
+                        title = stringResource(R.string.tor_direct_secs_title),
+                        icon = Icons.Rounded.Timer,
+                        // Presets, not a free number: the useful range is narrow and a
+                        // typed value here is a way to make Tor look broken.
+                        options = TOR_DIRECT_PRESETS,
+                        selected = profile.torDirectSecs
+                            .takeIf { it in TOR_DIRECT_PRESETS } ?: 0,
+                        label = { torDirectLabel(it) },
+                        onSelect = { onProfileChange(profile.copy(torDirectSecs = it)) },
+                        summary = stringResource(R.string.tor_direct_secs_desc),
+                        enabled = editable,
+                        aiTopic = AiTopic.TOR_DIRECT_SECS,
+                    )
+                    RowDivider(inset = false)
+                    // A text BLOCK, not a row: bridge lines are long, LTR and
+                    // multi-line, which is exactly what SettingsBlock hosts (the
+                    // same shape the routing rules use).
+                    SettingsBlock(
+                        helper = stringResource(R.string.tor_bridge_lines_desc),
+                        aiTopic = AiTopic.TOR_BRIDGE_LINES,
+                    ) {
+                        LtrOutlinedTextField(
+                            value = profile.torBridgeLines,
+                            onValueChange = { onProfileChange(profile.copy(torBridgeLines = it)) },
+                            enabled = editable,
+                            singleLine = false,
+                            label = { Text(stringResource(R.string.tor_bridge_lines_title)) },
+                            placeholder = { Text(stringResource(R.string.tor_bridge_lines_hint)) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+                RowDivider(inset = false)
+                // Applies in every Tor mode, chained included: the proof runs after
+                // the bootstrap, and the default target can be blocked either way.
+                SettingsBlock(
+                    helper = stringResource(R.string.tor_check_desc),
+                    aiTopic = AiTopic.TOR_CHECK,
+                ) {
+                    LtrOutlinedTextField(
+                        value = profile.torCheck,
+                        onValueChange = { onProfileChange(profile.copy(torCheck = it)) },
+                        enabled = editable,
+                        singleLine = true,
+                        isError = profile.torCheck.isNotBlank() &&
+                            profile.sanitizedTorCheck() == null,
+                        label = { Text(stringResource(R.string.tor_check_title)) },
+                        placeholder = { Text(stringResource(R.string.tor_check_hint)) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+            GroupFooter(stringResource(R.string.tor_group_footer))
+        }
     }
 
     settingsSection {
@@ -508,8 +620,19 @@ private fun ConnectionPage(
                     selected = profile.protocol,
                     onSelect = { onProfileChange(profile.copy(protocol = it)) },
                     label = { protocolLabel(it) },
-                    enabled = editable && profile.backend.usesAetherEngine,
+                    // The reverse chain runs MASQUE/HTTP-2 or nothing: the engine
+                    // refuses --wg and --gool through Tor. Disabled with the reason
+                    // written out, rather than accepting a choice that gets silently
+                    // overridden in Profile.effectiveProtocol.
+                    enabled = editable && profile.backend.usesAetherEngine &&
+                        profile.backend.torMode != TorMode.REVERSE,
                 )
+                if (profile.backend.torMode == TorMode.REVERSE) {
+                    SettingsNoticeRow(
+                        text = stringResource(R.string.protocol_forced_reverse),
+                        icon = Icons.Rounded.Info,
+                    )
+                }
             }
             RowDivider(inset = false)
             SettingsChoiceRow(
@@ -826,6 +949,10 @@ private fun ZeroTrustPage(
 
     if (profile.teamAuth != TeamAuth.OFF) {
         settingsSection {
+            // AUDIT F-3: the Access service token / client secret are typed and
+            // stored here. Screenshot-, screen-record- and recents-blind while
+            // this section is composed.
+            SecureSurface()
             SettingsGroup {
                 SettingsBlock {
                     LtrOutlinedTextField(
@@ -1303,6 +1430,10 @@ private fun PanelPage(
 private fun backendShortLabel(backend: TransportBackend): String = when (backend) {
     TransportBackend.AETHER -> "Aether"
     TransportBackend.AETHER_PSIPHON -> "Aether \u2192 Psiphon"
+    TransportBackend.TOR -> "Tor"
+    TransportBackend.AETHER_TOR -> "Aether \u2192 Tor"
+    TransportBackend.TOR_PSIPHON -> "Tor \u2192 Psiphon"
+    TransportBackend.TOR_AETHER -> "Tor \u2192 Aether"
 }
 
 @Composable
@@ -1311,6 +1442,30 @@ private fun backendHelp(backend: TransportBackend): String = when (backend) {
     // Persian UI explained its single most important setting in English.
     TransportBackend.AETHER -> stringResource(R.string.backend_help_aether)
     TransportBackend.AETHER_PSIPHON -> stringResource(R.string.backend_help_chained)
+    TransportBackend.TOR -> stringResource(R.string.backend_help_tor)
+    TransportBackend.AETHER_TOR -> stringResource(R.string.backend_help_aether_tor)
+    TransportBackend.TOR_PSIPHON -> stringResource(R.string.backend_help_tor_psiphon)
+    TransportBackend.TOR_AETHER -> stringResource(R.string.backend_help_tor_aether)
+}
+
+/** Bootstrap patience presets in seconds; 0 keeps the engine's own 75. */
+private val TOR_DIRECT_PRESETS = listOf(0, 20, 45, 120, 240)
+
+@Composable
+private fun torCountryLabel(code: String): String =
+    TorCountries.label(code, stringResource(R.string.tor_country_auto))
+
+@Composable
+private fun torDirectLabel(secs: Int): String = when (secs) {
+    0 -> stringResource(R.string.tor_direct_auto)
+    else -> stringResource(R.string.tor_direct_secs_value, secs)
+}
+
+@Composable
+private fun torBridgesLabel(bridges: TorBridges): String = when (bridges) {
+    TorBridges.AUTO -> stringResource(R.string.tor_bridges_auto)
+    TorBridges.ALWAYS -> stringResource(R.string.tor_bridges_always)
+    TorBridges.OFF -> stringResource(R.string.tor_bridges_off)
 }
 
 @Composable
@@ -1326,6 +1481,7 @@ private fun protocolLabel(protocol: Protocol): String = when (protocol) {
     Protocol.MASQUE -> stringResource(R.string.protocol_masque)
     Protocol.WIREGUARD -> stringResource(R.string.protocol_wireguard)
     Protocol.GOOL -> stringResource(R.string.protocol_gool)
+    Protocol.MIM -> stringResource(R.string.protocol_mim)
 }
 
 @Composable

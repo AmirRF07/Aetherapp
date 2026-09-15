@@ -1,12 +1,185 @@
-# Aether Mobile
+<p align="center">
+  <img src="docs/ads.png" alt="Aether — Freedom, in one tap" width="100%">
+</p>
 
-> A stunning, dark **Material You** Android client for the Aether engine — with the tunnelling core built **inside the app**, so you no longer need v2rayNG.
+<h1 align="center">Aether Mobile</h1>
 
-🇬🇧 English | 🇮🇷 [فارسی](README.fa.md)
+<p align="center">
+  A stunning, dark <b>Material You</b> Android client for the Aether engine — with the
+  tunnelling core built <b>inside the app</b>, so you no longer need v2rayNG.
+</p>
+
+<p align="center">
+  <a href="README.md">🇬🇧 English</a> · <a href="README.fa.md">🇮🇷 فارسی</a>
+</p>
+
+<p align="center">
+  <img alt="version" src="https://img.shields.io/badge/version-1.3.0-8B5CF6?style=flat-square">
+  <img alt="engine core" src="https://img.shields.io/badge/engine%20core-2.0.0-22D3EE?style=flat-square">
+  <img alt="min Android" src="https://img.shields.io/badge/Android-8.0%2B-3DDC84?style=flat-square">
+  <img alt="license" src="https://img.shields.io/badge/license-AGPL--3.0-F59E0B?style=flat-square">
+</p>
 
 ---
 
-## What's new in v1.2.9
+## What's new in v1.3.0
+
+### Tor, in four shapes
+
+The engine's own Tor implementation is now reachable from the app, as four modes
+you pick in **Settings → Connection → Network backend**:
+
+| Mode | Path | Your exit is | Use it when |
+| --- | --- | --- | --- |
+| **Tor** | Tor alone | a Tor exit node | you want Tor and nothing else in the way |
+| **Aether → Tor** | Aether tunnel, then Tor **inside** it | a Tor exit node | **your network blocks Tor** |
+| **Tor → Psiphon** | Tor, then Psiphon dialled through it | a Psiphon address, reached from Tor | a site blocks Tor exit nodes |
+| **Tor → Aether** | Tor, then the Aether tunnel **inside** it | a WARP address, reached from Tor | **your network blocks WARP** but not Tor |
+
+The two chains are mirror images, and which one you want depends on *what your
+network blocks*: `Aether → Tor` hides Tor from the network, `Tor → Aether` hides
+WARP from it. In the reverse chain the operator cannot tell that a VPN tunnel
+exists at all — it sees Tor, or a bridge that does not look like Tor either — and
+because your traffic travels inside the WARP tunnel there, that mode carries normal
+UDP. It is fixed to MASQUE over HTTP/2: Tor carries TCP only, WARP's WireGuard
+endpoints answer on UDP alone, and the engine refuses WireGuard and WARP×2 there.
+The app disables the protocol selector in that mode and says why, rather than
+accepting a choice it would have to override behind your back.
+
+**`Aether → Tor` is the one that matters on a censored network.** Tor's entry
+guards are dialled *through* the Aether tunnel, so the network you are on never
+sees a Tor connection at all — it sees Aether's obfuscated transport, the same
+thing it already fails to block. The bootstrap also runs at tunnel speed instead
+of fighting the censor.
+
+Plain **Tor** has to reach the Tor network by itself, so it brings bridges with
+it: the engine tries directly for a moment, then fetches bridges from bridgedb for
+the country it appears to be in and runs them through the obfs4/webtunnel
+transport shipped inside the APK. No CAPTCHA, nothing to paste in. You *can* paste
+in your own bridge lines if you have ones that are known to work — a line naming a
+transport this app does not ship is ignored rather than handed to the engine.
+
+**Tor carries TCP only**, everywhere and in every app, so the app puts a small
+SOCKS front of its own in front of it: DNS is resolved over TCP *inside* Tor,
+hostnames are passed to Tor unresolved (so `.onion` works and nothing is looked up
+on your device), and the remaining UDP is dropped. QUIC is dropped with it and apps
+fall back to TCP; a dropped packet goes nowhere, least of all around Tor.
+
+Expect it to be slower, and expect the first connect to take a while — Tor
+downloads a directory consensus before it can build a circuit. While it does, the
+notification shows how far the bootstrap has got.
+
+### A fifth protocol: MASQUE×2
+
+**MASQUE×2** (`--mim`) is MASQUE inside MASQUE — two MASQUE hops, for an exit
+address in a different range than one hop gives. It is to MASQUE what WARP×2
+(gool) is to WireGuard, and it sits beside the other four in the protocol
+selector.
+
+### Engine (core) upgraded to v2.0.0
+
+Previous: v1.9.0. Everything 1.2.8 fixed about download speed and connect
+behaviour is unchanged — those numbers were re-checked file by file, and
+upstream's own re-tuning of the same buffers was deliberately not taken.
+
+### The AI assistant knows what it is looking at
+
+The assistant is now told which mode the tunnel is actually in — it could
+previously only see the settings it may *write*, so it did not know whether
+Psiphon or Tor was in the path, and "switch to WARP×2 for speed" is wrong advice in
+a mode where no WARP tunnel exists. The bridge settings are deliberately
+**read-only** for it: a model that switches bridges off, while the user is reading
+about something else, takes away the only thing keeping that user connected.
+
+New AI explanations sit next to every Tor setting, in both languages.
+
+### 🔒 Security audit 1.3.0 — **88 / 100** audited, **93 / 100** shipped
+
+A full mobile-app security audit was run over the shipped tree: the Kotlin app
+(87 files, ≈28 200 lines), the Gradle and resource configuration, the manifest,
+the vendored Rust engine and its lockfile, the prebuilt Psiphon library and the
+release workflow. Full report:
+[`docs/SECURITY_AUDIT_1.3.0.md`](docs/SECURITY_AUDIT_1.3.0.md).
+
+| # | Area | Weight | Audited | After the fixes |
+| --- | --- | --- | --- | --- |
+| 1 | Secrets & key management | 15 | 95 | 95 |
+| 2 | Cryptography, TLS & MitM resistance | 14 | 92 | 95 |
+| 3 | Data-leak risk (DNS, IPv6, tunnel bypass) | 20 | 88 | 95 |
+| 4 | Local storage at rest | 13 | 94 | 94 |
+| 5 | Permissions & OS configuration | 8 | 98 | 98 |
+| 6 | Logging & diagnostics | 8 | 96 | 96 |
+| 7 | Code quality & network configuration | 10 | 78 | 84 |
+| 8 | On-device exposure (screen, clipboard) | 6 | 65 | 92 |
+| 9 | Supply chain & build integrity | 6 | 72 | 84 |
+| | **Weighted total** | **100** | **88** | **93** |
+
+**Verified as correct.** No API key, token or private key is hardcoded anywhere in
+the app, and the user's own Gemini key and the LAN sharing password are sealed with
+AES-256-GCM under a non-exportable Android Keystore key. No weak or obsolete
+crypto (no MD5, SHA-1, DES, RC4 or ECB). **No custom `TrustManager`, no permissive
+hostname verifier and no MitM path was found**; each hand-rolled TLS socket
+verifies the certificate against the host name, and the app trusts **system CAs
+only**, so a root certificate installed through Settings — how an interception
+proxy works — cannot decrypt the app's own traffic. Hostnames are never resolved on
+the device: in Tor modes DNS is answered over TCP *inside* Tor and non-DNS UDP is
+dropped rather than leaked, and `::/0` is routed unconditionally in chained modes,
+so there is no DNS or IPv6 leak path. The diagnostics log and the engine's identity
+file (which holds the WireGuard private key) are encrypted at rest, and the log
+mirror is switched off rather than falling back to plaintext if the keystore
+refuses a key. Cleartext HTTP is denied app-wide, backups and device transfer are
+denied twice over, five permissions are requested with no `QUERY_ALL_PACKAGES` and
+no exported provider, every `PendingIntent` is immutable, there is no WebView, and
+the app contains **no analytics, no crash-reporting SDK and no tracking library of
+any kind**. Three `Log` calls exist in the whole app, one of them debug-only.
+
+**Seven of the ten findings were fixed before this release went out**, which is
+what the second score column measures. The kill switch is **on by default** now,
+and its lockdown interface routes `::/0` unconditionally — a blackhole has no
+connectivity to break, so gating it on the IPv6 switch only ever left a v6 path
+open in the window the kill switch exists for. `FLAG_SECURE` covers the surfaces
+that show secrets (API key, LAN password, Access token, the open diagnostics log,
+the crash report): no screenshot, no screen recording, no recents thumbnail. The
+clipboard copies of those secrets are flagged sensitive, so Android 13+ keeps them
+out of the paste preview. Both cleartext geolocation fallbacks are gone — the exit
+IP now only ever comes from a TLS connection with the certificate checked. CI
+gained a `cargo audit` step and Dependabot watches the Gradle dependency set in one
+grouped pull request a month; the Psiphon binary has a provenance record.
+
+**Still open, deliberately.** R8 is off: a reflection break in Compose or in the
+Psiphon library shows up on a device, not in a unit test, and a broken release is
+worse for the people who need this app than an unminified one. CI actions are still
+pinned by tag rather than commit SHA. Both are documented in the report.
+
+**Read the fixes as source-level.** They were reviewed and built, and the unit
+suite (67 tests) passes, but no one has yet confirmed on a phone that the recents
+thumbnail is blank.
+
+**Out of scope:** app signing and update compatibility. 1.3.0 keeps the signing
+identity of 1.2.9 on purpose, so it installs over your existing app without an
+uninstall; no signing item is scored above, which is why this number is not
+comparable with the 79 / 100 of the 1.2.9 report.
+
+### Notes
+
+- **The Tor settings that matter most are the two you would not think to look
+  for.** Under **Settings → Tor**, *bridge country* stops the engine from having to
+  ask the network where you are before it can ask bridgedb for bridges — that
+  request is the one most likely to be blocked or answered wrongly on the networks
+  where you need a bridge. And *reachability check* replaces
+  `check.torproject.org`, which some networks block: when they do, a perfectly
+  working Tor circuit fails the engine's proof and the app reports a bootstrap
+  failure for something that was fine.
+- **Bridges apply in three of the four modes.** Wherever Tor faces your network
+  itself — `Tor`, `Tor → Psiphon`, `Tor → Aether` — the bridge settings are live. In
+  `Aether → Tor` they are disabled with the reason on the row: Tor is dialled
+  through the tunnel there, so the network never sees it and a bridge would have
+  nothing to hide from.
+- **Version:** app <span dir="ltr">1.3.0</span>, version code <span dir="ltr">14</span>,
+  engine core <span dir="ltr">2.0.0</span>. Installs straight over 1.2.9 from the
+  same repository — the signing configuration is unchanged.
+
+## Previously in v1.2.9
 
 - **Two real privacy leaks were found and closed while fixing that crash.** IPv4-mapped IPv6 addresses (`::ffff:203.0.113.9`) were only half-masked, leaving three octets of a public address in the digest, and Psiphon's JSON identifiers (`"sessionId":"…"`) were not recognised as identifiers at all. Both are masked now, and the redactor's test suite grew from 8 cases to 12.
 - **Engine (core) upgraded to v1.9.0** (previous: v1.8.0), with this app's own engine patches rebased onto the new sources rather than overwritten:

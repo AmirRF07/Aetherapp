@@ -96,7 +96,17 @@ GH_WEB="${CORE_GIT_BASE:-${SCHEME}://${GH_HOST}}"
 # "JoinHandle polled after completion" panic in the Gool double-tunnel teardown).
 # The two manual-range patches were re-applied onto the new sources and, apart
 # from those marked blocks, the vendored tree is byte-identical to upstream.
-BASELINE="1.8.0"
+# 1.3.0: raised to 2.0.0, and this time the floor matters for a user-visible
+# reason rather than a tidiness one. Core 2.0.0 is where Tor lives (arti-client
+# behind the optional `tor` feature, bridges fetched from bridgedb, the
+# pluggable transports in pt/), plus MASQUE-in-MASQUE, the QUIC
+# version-negotiation probe, socket marks and the descriptor-exhaustion fixes.
+# The app ships three Tor connection modes on top of that, so a core below
+# 2.0.0 cannot serve this app at all: the build would succeed and the Tor
+# modes would fail at connect time. All ten app patches were rebased onto
+# 2.0.0 (three-way, against .upstream-baseline), and netstack.rs was rebased
+# BY HAND - see .upstream-baseline/README.txt for why that one is not a merge.
+BASELINE="2.0.0"
 
 # App-specific patches carried on top of the upstream engine. These are MERGED
 # (three-way) onto the new upstream sources, never blind-copied over them.
