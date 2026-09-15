@@ -58,6 +58,7 @@ censored, monitored network; possibly a seized or rooted device).
 | F-3 | Medium | No `FLAG_SECURE`: the API-key field, the LAN password and the diagnostics log are screenshot- and recents-visible | no occurrence in `app/src` | **Fixed** |
 | F-4 | Low | Secrets copied to the clipboard are not marked sensitive | `SharePanel.kt`, `DiagnosticsPanel.kt`, `CrashReportActivity.kt` | **Fixed** |
 | F-5 | Low | Two of three geolocation providers are cleartext HTTP on a raw socket | `NetProbe.kt:87-88` | **Fixed** |
+| F-5b | **Medium** | The country-refinement lookup was still cleartext ip-api **and reachable from the direct, untunnelled path**, so it emitted a plaintext, app-shaped request containing the user's real public IP on every disconnected IP refresh | `NetProbe.kt` `refineCountry`, `fetchIpInfoDirect` | **Fixed after the audit** |
 | F-6 | Low | R8/minification and resource shrinking are disabled for release | `app/build.gradle.kts:257-258` | Open (deliberate) |
 | F-7 | Low | No dependency-vulnerability or secret scanning in CI | `.github/workflows/build.yml` | Partly fixed |
 | F-8 | Low | A 44 MB prebuilt Psiphon `.aar` is committed instead of built or verified against upstream | `app/libs/psiphontunnel-2.0.39.aar` | Documented, not verified |
@@ -120,6 +121,84 @@ apply to them. What an on-path observer gets is the fact that this device asked
 "what is my IP" in a recognisable form — a weak but real fingerprint of the app
 on a network where the app's presence is the sensitive fact. `1.1.1.1` also
 serves `/cdn-cgi/trace` over TLS; using it would cost nothing.
+
+### F-5b — The refinement lookup this audit missed (found after the release)
+
+**This item was not in the original report. It is recorded here because the fix
+for F-5 was incomplete and the report's own wording concealed it.**
+
+F-5 fixed the provider LIST. It did not touch `refineCountry()`, and the closing
+sentence of the F-5 remediation — "country refinement is still ip-api over HTTP
+and is still informational only" — reads like a caveat about a label. It was a
+description of a leak.
+
+What the code actually did:
+
+* `refineCountry()` ran after EVERY successful probe, on all three call sites, to
+  make two geo databases agree on which flag to draw.
+* One of those call sites was `fetchIpInfoDirect()` — the **untunnelled** probe
+  that fills the IP badge while the app is disconnected (`MainActivity.kt`, state
+  `idle`).
+* On that path it opened a second connection, in the clear, to `ip-api.com:80`,
+  with the request line `GET /json/<the user's real public IP>?fields=status,countryCode`
+  and the header `User-Agent: Aether/1.0`.
+* Raw socket, so `cleartextTrafficPermitted="false"` never applied — the same
+  exemption this report notes for F-5, still in force here.
+
+**What actually leaks, stated precisely.** Not the IP address: the operator sees
+that as the source address of every packet the device sends, so re-sending it
+changes nothing. What leaks is a *plaintext request whose shape and User-Agent
+identify this application*, repeated on every IP refresh, at the moment the user
+is NOT protected. In this app's threat model the presence of the app is itself the
+sensitive fact, which is exactly the reasoning F-5 used one paragraph earlier —
+it simply was not carried through to this function. Severity is therefore Medium,
+not Low: it is app-presence disclosure on the operator's network, not a
+spoofable flag.
+
+**Fix.** The decision is now a single pure function with two mandatory conditions:
+
+```kotlin
+internal fun shouldRefineCountry(providerHost: String, countryCode: String?, viaTunnel: Boolean): Boolean {
+    if (!viaTunnel) return false                 // never on the operator's network
+    if (providerHost == "ip-api.com") return false
+    return countryCode.isNullOrBlank()           // only when there is no country at all
+}
+```
+
+1. **Tunnelled only.** Through the tunnel the request leaves from the exit, so no
+   one on the user's network sees it, and the address inside it is the exit's.
+2. **Only when the country is unknown.** Harmonising a flag that is already known
+   is cosmetic, and a cosmetic request does not get to exist.
+
+`fetchIpInfoDirect()` no longer references `refineCountry` at all — verified in
+the compiled bytecode (`javap -c`: the only callers are `fetchIpInfoViaSocks` and
+the raced lambda, both tunnelled), not only in the source. The rule is pinned by
+`app/src/test/java/studio/cluvex/aether/core/NetProbeGeoPolicyTest.kt` (7 cases,
+including the full truth table), so a refactor that reintroduces the direct call
+fails in CI instead of on a phone.
+
+**The three User-Agent headers went with it.** `Aether/1.0` (`NetProbe`, the one
+header that was operator-visible), `aether-ping` (`PingMonitor`) and
+`Aether-Android/1.2.9` (`GeminiHttp` — also still claiming 1.2.9 inside a 1.3.0
+build) are now `Mozilla/5.0`. The latter two ride inside TLS and were never
+visible to the operator; they named the app to the endpoint for nothing.
+
+**Reviewed in the same pass and deliberately left alone:**
+`AetherVpnService.probeTunnelOnce()` completes a TLS handshake without hostname
+verification. It sends no request and reads nothing out of the answer except
+"bytes made a round trip", which is the whole point of the watchdog. Verifying
+would make a captive portal or an interception proxy indistinguishable from a
+wedged tunnel and drive a reconnect loop on precisely the networks where it must
+not. A comment now states this at the call site. This does not contradict the
+report's "every hand-rolled TLS socket verifies the hostname": the sockets that
+carry data — `NetProbe.tlsWrap`, `GeminiHttp.tlsWrap`, `SmartAuto.tlsSniProbe` —
+all verify.
+
+**Scope of this fix.** Source-level and unit-tested; the app version is unchanged
+(1.3.0 / versionCode 14 / PATCHLEVEL 1.3.0) because nothing user-facing changed.
+No one has yet watched the traffic of a running build to confirm that no packet
+reaches `ip-api.com` while disconnected — that is the one check a phone can make
+and a sandbox cannot.
 
 ### F-6 — R8 off
 
@@ -255,7 +334,8 @@ refused change is surfaced to the user instead of being swallowed. Tests:
    `EXTRA_IS_SENSITIVE` to every clipboard copy of a secret (F-3, F-4).
 4. Add `cargo audit` and a Gradle dependency check to CI; pin actions by SHA
    (F-7, F-9).
-5. Replace the cleartext geo fallbacks with `1.1.1.1:443` (F-5).
+5. Replace the cleartext geo fallbacks with `1.1.1.1:443` (F-5), and gate the
+   ip-api refinement on "tunnelled" + "country unknown" (F-5b).
 6. Record the upstream URL and published checksum of the Psiphon AAR, or build it
    in CI (F-8).
 7. Turn R8 on and test Compose/Psiphon reflection paths (F-6).
@@ -300,6 +380,7 @@ are the three things to check first on a device.
 | F-3 | `SecureSurface()` holds `FLAG_SECURE` while a secret-bearing surface is composed; `CrashReportActivity` sets it on its window | new `ui/components/PrivacyGuard.kt`; wired in `SharePanel.kt`, `DiagnosticsPanel.kt`, `AiPages.kt`, `SettingsScreen.kt`, `CrashReportActivity.kt` |
 | F-4 | `copySensitive()` sets `EXTRA_IS_SENSITIVE` on the clip; used for the proxy credential, the verbatim log and the crash dump | `PrivacyGuard.kt` + the three call sites |
 | F-5 | Both cleartext geo providers dropped; the fallback is `1.1.1.1:443` over TLS | `NetProbe.kt` |
+| F-5b | `shouldRefineCountry()` gates the ip-api refinement on "through the tunnel" AND "no country known"; `fetchIpInfoDirect` no longer refines at all; the three app-naming User-Agents are gone | `NetProbe.kt`, `PingMonitor.kt`, `GeminiHttp.kt`, new `NetProbeGeoPolicyTest.kt` |
 | F-7 | `cargo audit` step in CI (non-blocking) + Dependabot for the gradle set: one entry, monthly, all bumps grouped into a single PR | `.github/workflows/build.yml`, new `.github/dependabot.yml` |
 | F-8 | Provenance record for the committed AAR: size, SHA-256, upstream project, and what the hash does *not* prove | new `app/libs/PROVENANCE.md` |
 

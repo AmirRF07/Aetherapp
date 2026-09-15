@@ -89,11 +89,12 @@ object NetProbe {
      * still holds - the Cloudflare DNS certificate carries `1.1.1.1` as an
      * iPAddress SAN and [tlsWrap] checks it through the platform verifier.
      *
-     * The country REFINEMENT (see [refineCountry]) is still ip-api over plain
-     * HTTP, because its free tier offers no TLS. That label is informational and
-     * must never be treated as proof of anything; the exit IP, which is what the
-     * self-test and the user rely on, now only ever comes from an authenticated
-     * source.
+     * The country REFINEMENT (see [refineCountry]) still uses ip-api over plain
+     * HTTP, because its free tier offers no TLS - but F-5 left that call reachable
+     * from the DIRECT path, which was the actual leak and is fixed in
+     * [shouldRefineCountry]. The label is informational and must never be treated
+     * as proof of anything; the exit IP, which is what the self-test and the user
+     * rely on, now only ever comes from an authenticated source.
      */
     private val GEO_PROVIDERS = listOf(
         GeoProvider("www.cloudflare.com", 443, "/cdn-cgi/trace", tls = true, hostIsDomain = true),
@@ -113,11 +114,23 @@ object NetProbe {
             }.onFailure {
                 DiagnosticsLog.d("netprobe", "direct geo ${p.host} failed: ${it.message}")
             }.getOrNull()
-            if (info != null) {
-                return refineCountry(info, p) { host, port ->
-                    openDirectIpv4(host, port, timeoutMs)
-                }
-            }
+            // SECURITY (F-5 follow-up): NO country refinement on this path.
+            //
+            // This is the UNTUNNELLED probe - it exists to show the operator's own
+            // IP while disconnected. Refining the country here opened a SECOND,
+            // CLEARTEXT connection (ip-api.com:80, a raw socket, so
+            // `usesCleartextTraffic="false"` never applied) whose request line
+            // carried this device's real public IP, sent over the very network the
+            // app is supposed to protect the user from. The operator already knows
+            // that IP - it is the source address of the packet - so the leak is not
+            // the address itself: it is a plaintext, app-shaped
+            // "GET /json/<my own ip>?fields=status,countryCode" that identifies
+            // Aether on a network where merely running Aether is the sensitive
+            // fact. The flag on a disconnected badge is not worth that.
+            //
+            // The provider's own `loc=` is used as-is; no refinement, no second
+            // request. See [shouldRefineCountry] for the rule and the test.
+            if (info != null) return info
         }
         return null
     }
@@ -162,7 +175,7 @@ object NetProbe {
                 DiagnosticsLog.d("netprobe", "proxied geo ${p.host} failed: ${it.message}")
             }.getOrNull()
             if (info != null) {
-                return refineCountry(info, p) { host, port ->
+                return refineCountry(info, p, viaTunnel = true) { host, port ->
                     socks5Connect(socksHost, socksPort, host, port, useDomain = true, timeoutMs)
                 }
             }
@@ -207,7 +220,7 @@ object NetProbe {
                 }.getOrNull()
                 if (info != null) {
                     val refined = runCatching {
-                        refineCountry(info, p) { host, port ->
+                        refineCountry(info, p, viaTunnel = true) { host, port ->
                             socks5Connect(socksHost, socksPort, host, port, useDomain = true, timeoutMs)
                         }
                     }.getOrDefault(info)
@@ -259,22 +272,64 @@ object NetProbe {
     }
 
     /**
-     * FLAG-CORRECTNESS FIX: Cloudflare's /cdn-cgi/trace `loc=` is the country
-     * Cloudflare attributes to the CLIENT — behind WARP that often differs
-     * from the country the exit IP itself is registered in (which is what
-     * ip-api reports). Depending on which provider happened to win, the badge
-     * showed a different flag for the very same connection. Whenever a
-     * non-ip-api provider supplied the IP, re-ask ip-api about THAT exact IP
-     * over the same network path, so the flag always comes from one geo
-     * database. Falls back to the provider's own country code if ip-api is
-     * unreachable.
+     * Whether a country refinement lookup may be made at all.
+     *
+     * SECURITY RULE (F-5 follow-up). The refinement is one plaintext HTTP request
+     * to `ip-api.com:80` whose path contains an IP address. Two conditions have to
+     * hold before that request is allowed to exist, and BOTH are enforced here so
+     * there is exactly one place to audit and one place to test:
+     *
+     *  1. **Tunnelled only.** [viaTunnel] must be true. On a direct socket the
+     *     request travels the operator's network in the clear, carrying the user's
+     *     real IP in its request line and the recognisable shape of this app. That
+     *     was the leak: it fired on every disconnected IP refresh, which is exactly
+     *     when the user has no protection. Through the tunnel the request leaves
+     *     from the exit, so neither the operator nor anyone between sees it, and
+     *     the address in it is the exit address - not the user's.
+     *  2. **Only when the country is actually unknown.** The refinement used to run
+     *     on EVERY successful probe, purely to make two geo databases agree on a
+     *     flag. A cosmetic request is still a request; it does not get to exist. If
+     *     the provider already reported a country, that country is used.
+     *
+     * The [providerHost] check keeps the old guard: ip-api never re-asks itself.
+     *
+     * `internal` rather than `private` so `NetProbeGeoPolicyTest` can pin the rule
+     * on the JVM. It is a pure function - no socket, no Android type.
+     */
+    internal fun shouldRefineCountry(
+        providerHost: String,
+        countryCode: String?,
+        viaTunnel: Boolean,
+    ): Boolean {
+        if (!viaTunnel) return false
+        if (providerHost == "ip-api.com") return false
+        return countryCode.isNullOrBlank()
+    }
+
+    /**
+     * Fills in a MISSING country code, through the tunnel, or returns [info]
+     * unchanged.
+     *
+     * Background: Cloudflare's /cdn-cgi/trace `loc=` is the country Cloudflare
+     * attributes to the CLIENT, which behind WARP often differs from the country
+     * the exit IP is registered in (what ip-api reports), so the badge could show a
+     * different flag for the same connection depending on which provider won. That
+     * cosmetic disagreement is NO LONGER worth a network request: harmonising it
+     * cost a cleartext lookup on every probe, and on the direct path that lookup
+     * carried the user's real IP over the operator's network. Now the lookup only
+     * happens when there is no country at all to show, and only inside the tunnel -
+     * see [shouldRefineCountry], which is where the rule lives.
+     *
+     * [open] MUST return a tunnelled socket. Callers state this with [viaTunnel];
+     * a caller that cannot honour it must not call this function.
      */
     private fun refineCountry(
         info: IpInfo,
         provider: GeoProvider,
+        viaTunnel: Boolean,
         open: (host: String, port: Int) -> Socket,
     ): IpInfo {
-        if (provider.host == "ip-api.com") return info
+        if (!shouldRefineCountry(provider.host, info.countryCode, viaTunnel)) return info
         val cc = runCatching {
             open("ip-api.com", 80).use { s ->
                 val body = httpGet(s, "ip-api.com", "/json/${info.ip}?fields=status,countryCode")
@@ -587,7 +642,13 @@ object NetProbe {
         val request = buildString {
             append("GET ").append(path).append(" HTTP/1.1\r\n")
             append("Host: ").append(host).append("\r\n")
-            append("User-Agent: Aether/1.0\r\n")
+            // SECURITY (F-5 follow-up): NO app name on the wire. This header used
+            // to read "Aether/1.0", which named the app - and its version - in
+            // every probe, including the one plaintext request this class can still
+            // make. On a network where running this app is itself the sensitive
+            // fact, that is the fingerprint, more direct than the shape of the
+            // request. A bare, extremely common token identifies nothing.
+            append("User-Agent: Mozilla/5.0\r\n")
             append("Accept: */*\r\n")
             append("Connection: close\r\n\r\n")
         }

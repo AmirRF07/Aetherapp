@@ -109,8 +109,38 @@ App 1.3.0 / versionCode 14, signed with the same certificate, so it installs ove
   * F-5: `NetProbe.GEO_PROVIDERS` is TLS-only. `ip-api.com:80` is gone as an IP
     source and `1.1.1.1` moved to 443. The IP literal is kept deliberately so no DNS
     is in the probe path; the certificate carries `1.1.1.1` as an iPAddress SAN and
-    `tlsWrap` verifies it. Country refinement is still ip-api over HTTP and is still
-    informational only.
+    `tlsWrap` verifies it.
+  * F-5 FOLLOW-UP (version unchanged: 1.3.0 / versionCode 14): the sentence that used
+    to end the item above - "country refinement is still ip-api over HTTP and is still
+    informational only" - was describing a leak, not a caveat. `refineCountry()` ran
+    on EVERY successful probe, including the one on the DIRECT path
+    (`fetchIpInfoDirect`, the disconnected IP badge). That opened a second, plaintext
+    HTTP connection to `ip-api.com:80` on a RAW socket - so
+    `cleartextTrafficPermitted="false"` never applied to it - whose request line
+    carried this device's real public IP, over the operator's own network, on every
+    IP refresh while the user had no tunnel. The address itself is not the secret
+    (the operator sees it as the source of every packet); what leaked was a
+    plaintext, app-shaped `GET /json/<own ip>?fields=status,countryCode` that
+    identifies THIS APP on a network where running it is the sensitive fact.
+    Two conditions now gate that request, both in one pure function
+    (`NetProbe.shouldRefineCountry`, pinned by `NetProbeGeoPolicyTest`, 7 cases):
+    it must go THROUGH THE TUNNEL, and it only happens when the provider returned
+    no country at all. Harmonising two geo databases so the flag looks consistent
+    is not a reason to emit a request. `fetchIpInfoDirect` no longer references
+    `refineCountry` at all - verified in the bytecode, not just the source.
+  * Same follow-up, the header that made it worse: the probe sent
+    `User-Agent: Aether/1.0`, i.e. the app's own name, in that plaintext request.
+    Now `Mozilla/5.0`. The two other app-naming agents are gone with it -
+    `aether-ping` in `PingMonitor` and `Aether-Android/1.2.9` in `GeminiHttp` (which
+    also still claimed 1.2.9 inside a 1.3.0 build). Both of those ride inside TLS, so
+    they were never operator-visible; they named the app to the endpoint for nothing.
+  * Reviewed and deliberately NOT changed: the watchdog's liveness probe in
+    `AetherVpnService.probeTunnelOnce` completes a TLS handshake without verifying
+    the hostname. It sends no request and trusts nothing from the answer - it only
+    measures whether bytes make a round trip through the payload path - and adding
+    verification would turn a captive portal or an interception proxy into "tunnel
+    wedged" and drive a reconnect loop. A comment now says so on the spot, so the
+    next reader does not "fix" it into a regression.
   * F-7: non-blocking `cargo audit` step in CI (placed after the engine build, since
     the Rust tree does not exist before `fetch-natives.sh`) plus new
     `.github/dependabot.yml`: **one** entry (gradle), monthly, all bumps grouped into

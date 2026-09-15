@@ -204,7 +204,10 @@ object PingMonitor {
         val request = (
             "HEAD / HTTP/1.1\r\n" +
                 "Host: ${w.host}\r\n" +
-                "User-Agent: aether-ping\r\n" +
+                // No app name on the wire (F-5 follow-up). This ran inside TLS, so
+                // it was never operator-visible - but it named the app to every
+                // endpoint the latency probe touches, for nothing.
+                "User-Agent: Mozilla/5.0\r\n" +
                 "Accept: */*\r\n" +
                 "Connection: keep-alive\r\n\r\n"
             ).toByteArray(Charsets.US_ASCII)
