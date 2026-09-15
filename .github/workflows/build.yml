@@ -79,38 +79,65 @@ jobs:
         with:
           packages: "platform-tools platforms;android-35 build-tools;35.0.0"
 
-      # Same class of failure, one step later: this used to swallow sdkmanager's
-      # output into /dev/null, so a package that is no longer served would fail
-      # here with nothing to read. Keep the log, and prove the NDK is actually
-      # on disk before exporting a path that later steps depend on.
+      # This step swallowed sdkmanager's output into /dev/null, so a package that
+      # is no longer served would fail here with nothing to read. Keep the log,
+      # and prove the NDK is on disk before exporting a path later steps use.
+      #
+      # DO NOT ADD `set -o pipefail` HERE, AND DO NOT PIPE INTO sdkmanager.
+      # Both were tried and both fail a build in which nothing is wrong:
+      # `yes | sdkmanager ...` ends with sdkmanager exiting first and `yes`
+      # getting EPIPE on its next write, so it prints "yes: standard output:
+      # Broken pipe" and exits non-zero. Without pipefail that status is
+      # discarded (only sdkmanager's counts, which is why the original line
+      # worked); with pipefail it becomes the step's exit code and the job dies
+      # AFTER the NDK was downloaded and unzipped successfully - exactly what
+      # happened in run 94592578298. The pipe is not needed at all: the SDK
+      # licences were already accepted by the previous step
+      # (accept-android-sdk-licenses), so sdkmanager does not prompt. Redirecting
+      # </dev/null makes that explicit and cannot break.
       - name: Install NDK
         run: |
-          set -euo pipefail
+          set -eu
           SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?Android SDK root is not set}}"
-          yes | sdkmanager "ndk;${NDK_VERSION}"
+          sdkmanager --install "ndk;${NDK_VERSION}" </dev/null
           if [ ! -d "${SDK}/ndk/${NDK_VERSION}" ]; then
             echo "::error::NDK ${NDK_VERSION} was not installed at ${SDK}/ndk/${NDK_VERSION}."
-            echo "Available NDKs:"; ls -1 "${SDK}/ndk" 2>/dev/null || echo "  (none)"
+            echo "NDKs present:"
+            ls -1 "${SDK}/ndk" 2>/dev/null || echo "  (none)"
             exit 1
           fi
           echo "ANDROID_NDK_HOME=${SDK}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
       # Fail here, with a readable message, rather than three steps later inside
       # a Gradle stacktrace or with `ls -d .../build-tools/*` expanding to a
-      # literal glob in the signature check.
+      # literal glob in the signature check. Written without pipefail and
+      # without `set -e` aborting a check mid-way, so every failure path here
+      # prints WHY it failed instead of ending the step silently.
       - name: Verify Android SDK layout
         run: |
-          set -euo pipefail
+          set -u
           SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
           echo "ANDROID_SDK_ROOT=${SDK}"
-          for d in "platforms/android-35" "platform-tools"; do
-            [ -d "${SDK}/${d}" ] || { echo "::error::missing SDK component: ${d}"; exit 1; }
+          rc=0
+          for d in "platforms/android-35" "platform-tools" "ndk/${NDK_VERSION}"; do
+            if [ -d "${SDK}/${d}" ]; then
+              echo "  ok: ${d}"
+            else
+              echo "::error::missing SDK component: ${d}"
+              rc=1
+            fi
           done
-          BT="$(ls -d "${SDK}"/build-tools/*/ 2>/dev/null | sort -V | tail -n1)"
-          [ -n "$BT" ] && [ -x "${BT}apksigner" ] \
-            || { echo "::error::no build-tools with apksigner in ${SDK}/build-tools"; exit 1; }
-          echo "build-tools: ${BT}"
-          sdkmanager --list_installed || true
+          BT=""
+          for d in "${SDK}"/build-tools/*/; do
+            [ -x "${d}apksigner" ] && BT="$d"
+          done
+          if [ -n "$BT" ]; then
+            echo "  ok: build-tools with apksigner -> ${BT}"
+          else
+            echo "::error::no build-tools containing apksigner under ${SDK}/build-tools"
+            rc=1
+          fi
+          exit "$rc"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -650,9 +677,17 @@ jobs:
             mapfile -t abis < <(printf '%s\n' "$entries" | sed -n 's#^lib/\([^/]*\)/libaether\.so$#\1#p')
             [ "${#abis[@]}" -gt 0 ] || { echo "ERROR: no libaether.so in $apk"; exit 1; }
             for abi in "${abis[@]}"; do
-              printf '%s\n' "$entries" | grep -qx "lib/${abi}/libhev-socks5-tunnel.so" \
+              # NOT `printf ... | grep -qx`: this step runs under `set -o pipefail`,
+              # and `grep -q` exits the moment it matches. When the APK's entry
+              # list is larger than the 64 KiB pipe buffer (a release APK easily
+              # is) printf is still writing, gets EPIPE, and the pipeline returns
+              # 141 - so the check FAILS while the library it looked for is
+              # present. Measured: 162 KB list, match near the front -> exit 141.
+              # It only ever passed because the match happened to sit late enough
+              # in the listing. A here-string has no pipe and cannot do this.
+              grep -qx -- "lib/${abi}/libhev-socks5-tunnel.so" <<< "$entries" \
                 || { echo "ERROR: $apk lacks hev for $abi"; exit 1; }
-              printf '%s\n' "$entries" | grep -qx "lib/${abi}/libaethertun.so" \
+              grep -qx -- "lib/${abi}/libaethertun.so" <<< "$entries" \
                 || { echo "ERROR: $apk lacks the aethertun JNI bridge for $abi"; exit 1; }
               # ---------------------------------------------------------- r5
               # THE GATE THAT WOULD HAVE SAVED THE r4 ROUND.
