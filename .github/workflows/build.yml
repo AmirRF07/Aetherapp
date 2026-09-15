@@ -39,21 +39,78 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
+      # ROOT FIX (2026-09-15): this step - not anything in the repository - is
+      # what killed the build 14 seconds in, before a single file of the
+      # checkout was read:
+      #
+      #   [command] .../cmdline-tools/16.0/bin/sdkmanager tools
+      #   Warning: Failed to find package 'tools'
+      #   Error: The process '.../sdkmanager' failed with exit code 1
+      #
+      # android-actions/setup-android's `packages` input DEFAULTS to
+      # "tools platform-tools", and the action hands those to sdkmanager one at
+      # a time. `tools` is the retired SDK Tools package (superseded years ago
+      # by cmdline-tools, which this same action installs through its own
+      # cmdline-tools-version input). Google stopped serving `tools` from the
+      # SDK repository, so sdkmanager cannot find it and exits 1, which the
+      # action turns into a job failure. Every repository using the action with
+      # no `packages` input broke at the same moment - which is why the same
+      # commit built fine in a scratch repository a day earlier and dies here.
+      #
+      # So we never rely on that default again: state EXACTLY what this build
+      # needs. That also removes the second dependency on luck - compileSdk 35
+      # and the build-tools used by the apksigner step were only ever there
+      # because the runner image happened to preinstall them, and the images
+      # drop old platforms over time.
+      #   platform-tools          - adb + the tooling Gradle expects to find
+      #   platforms;android-35    - compileSdk = 35 / targetSdk = 35
+      #   build-tools;35.0.0      - apksigner for "Verify release signature"
+      # `tools` is deliberately absent and must never be added back.
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
 
+      # Same class of failure, one step later: this used to swallow sdkmanager's
+      # output into /dev/null, so a package that is no longer served would fail
+      # here with nothing to read. Keep the log, and prove the NDK is actually
+      # on disk before exporting a path that later steps depend on.
       - name: Install NDK
         run: |
-          yes | sdkmanager "ndk;${NDK_VERSION}" > /dev/null
-          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?Android SDK root is not set}}"
+          yes | sdkmanager "ndk;${NDK_VERSION}"
+          if [ ! -d "${SDK}/ndk/${NDK_VERSION}" ]; then
+            echo "::error::NDK ${NDK_VERSION} was not installed at ${SDK}/ndk/${NDK_VERSION}."
+            echo "Available NDKs:"; ls -1 "${SDK}/ndk" 2>/dev/null || echo "  (none)"
+            exit 1
+          fi
+          echo "ANDROID_NDK_HOME=${SDK}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      # Fail here, with a readable message, rather than three steps later inside
+      # a Gradle stacktrace or with `ls -d .../build-tools/*` expanding to a
+      # literal glob in the signature check.
+      - name: Verify Android SDK layout
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
+          echo "ANDROID_SDK_ROOT=${SDK}"
+          for d in "platforms/android-35" "platform-tools"; do
+            [ -d "${SDK}/${d}" ] || { echo "::error::missing SDK component: ${d}"; exit 1; }
+          done
+          BT="$(ls -d "${SDK}"/build-tools/*/ 2>/dev/null | sort -V | tail -n1)"
+          [ -n "$BT" ] && [ -x "${BT}apksigner" ] \
+            || { echo "::error::no build-tools with apksigner in ${SDK}/build-tools"; exit 1; }
+          echo "build-tools: ${BT}"
+          sdkmanager --list_installed || true
 
       - name: Set up Go
         uses: actions/setup-go@v5
