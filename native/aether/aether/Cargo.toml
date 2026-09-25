@@ -1,5 +1,5 @@
 [package]
-name = "avatar"
+name = "aether"
 version = "2.1.0"
 edition = "2021"
 # 1.3.0 CORE 2.0.0 REBASE: upstream raised the floor to 1.98 (arti-client and
