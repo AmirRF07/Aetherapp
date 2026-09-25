@@ -1,6 +1,10 @@
-#![allow(dead_code)]
+#![allow(dead_code)]#[no_mangle]
+pub static APP_BUILD_STAMP: &[u8; 25] = b"AETHER-BUILD-STAMP:1.3.0\0";
+
 #[no_mangle]
-pub static APP_BUILD_STAMP: &[u8; 25] = b"AETHER-BUILD-STAMP:1.3.0\0";pub mod account;
+pub extern "C" fn aether_app_build_stamp() -> *const u8 {
+    APP_BUILD_STAMP.as_ptr()
+}
 pub mod aethernoize;
 pub mod api;
 pub mod apifront;
