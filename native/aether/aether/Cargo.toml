@@ -1,6 +1,6 @@
 [package]
-name = "aether"
-version = "2.0.0"
+name = "avatar"
+version = "2.1.0"
 edition = "2021"
 # 1.3.0 CORE 2.0.0 REBASE: upstream raised the floor to 1.98 (arti-client and
 # the 2.0.0 dependency set need it). Taken as-is; the app's CI toolchain is
@@ -13,7 +13,6 @@ repository = "https://github.com/CluvexStudio/aether"
 # Stamps the APP patch level into the binary. See build.rs for the full reason;
 # short version: r2/r3/r4 were byte-indistinguishable from the outside and a
 # whole field-test round was wasted on a stale engine.
-build = "build.rs"
 # <<< AETHER-APP-PATCH build-provenance
 
 [lib]
