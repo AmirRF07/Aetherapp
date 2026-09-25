@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 #[no_mangle]
-pub static APP_BUILD_STAMP: &[u8; 26] = b"AETHER-BUILD-STAMP:1.3.0\0";
-pub mod account;
+pub static APP_BUILD_STAMP: &[u8; 25] = b"AETHER-BUILD-STAMP:1.3.0\0";pub mod account;
 pub mod aethernoize;
 pub mod api;
 pub mod apifront;
