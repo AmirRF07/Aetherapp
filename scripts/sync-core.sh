@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-CORE_SYNC="off"
-CORE_TARGET="2.0.0"
+CORE_SYNC="on"
+CORE_TARGET="2.1.0"
 #
 # sync-core.sh - keep the vendored Aether engine (core) in sync with the
 # official upstream repository, automatically, on every CI build.
