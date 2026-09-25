@@ -4,13 +4,65 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Stylised "A" shield mark -->
-    <group android:scaleX="0.62" android:scaleY="0.62" android:pivotX="54" android:pivotY="54">
+
+    <!-- لایه پس‌زمینه تیره و متناسب با آیکون -->
+    <path
+        android:fillColor="#0D131F"
+        android:pathData="M0,0h108v108h-108z" />
+
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.82"
+        android:scaleY="0.82">
+
+        <!-- رینگ و قطعات محیطی بیرونی -->
         <path
-            android:fillColor="#4C8DFF"
-            android:pathData="M54,20L82,86L66,86L54,54L42,86L26,86Z" />
+            android:fillColor="#24518C"
+            android:pathData="M54,12 C77.2,12 96,30.8 96,54 C96,77.2 77.2,96 54,96 C30.8,96 12,77.2 12,54 C12,30.8 30.8,12 54,12 Z M54,18 C34.1,18 18,34.1 18,54 C18,73.9 34.1,90 54,90 C73.9,90 90,73.9 90,54 C90,34.1 73.9,18 54,18 Z" />
+
+        <!-- شیارهای نورانی حلقه بیرونی -->
         <path
-            android:fillColor="#32E0C4"
-            android:pathData="M54,44L64,70L44,70Z" />
+            android:fillColor="#4CA9FF"
+            android:pathData="M52,14 L56,14 L56,20 L52,20 Z" />
+        <path
+            android:fillColor="#4CA9FF"
+            android:pathData="M88,52 L94,52 L94,56 L88,56 Z" />
+        <path
+            android:fillColor="#4CA9FF"
+            android:pathData="M14,52 L20,52 L20,56 L14,56 Z" />
+
+        <!-- رینگ میانی دور سر -->
+        <path
+            android:fillColor="#1B325B"
+            android:pathData="M54,22 C71.7,22 86,36.3 86,54 C86,71.7 71.7,86 54,86 C36.3,86 22,71.7 22,54 C22,36.3 36.3,22 54,22 Z M54,26 C38.5,26 26,38.5 26,54 C26,69.5 38.5,82 54,82 C69.5,82 82,69.5 82,54 C82,38.5 69.5,26 54,26 Z" />
+
+        <!-- فرم سر و نیم‌رخ سایبرنتیک -->
+        <path
+            android:fillColor="#58B8FF"
+            android:pathData="M48,28 C56,28 65,33 66,42 C67,46 64,49 65,51 C66.5,53 69,54 68,58 C67,61 64.5,62 64.5,65 C64.5,67 59,71 55,73 C53,69 51,62 49,60 C46,57 44,52 44,46 C44,36 45,30 48,28 Z" />
+
+        <!-- هسته گرد مغز / نماد ارتباطی داخل سر -->
+        <path
+            android:fillColor="#1E284A"
+            android:pathData="M51,36 A9,9 0 1,0 51,54 A9,9 0 1,0 51,36 Z" />
+
+        <path
+            android:fillColor="#00F5D4"
+            android:pathData="M51,41 A4,4 0 1,0 51,49 A4,4 0 1,0 51,41 Z" />
+
+        <!-- شانه و خطوط انرژی پایین سر -->
+        <path
+            android:fillColor="#3D7BFF"
+            android:pathData="M31,69 C37,63 46,65 52,70 C48,74 41,77 34,77 C31,77 31,73 31,69 Z" />
+
+        <path
+            android:fillColor="#22C8FF"
+            android:pathData="M37,73 C46,69 54,72 61,81 C54,84 45,84 39,81 C36,79 36,75 37,73 Z" />
+
+        <path
+            android:fillColor="#6A45FF"
+            android:pathData="M52,69 C56,66 61,67 67,73 C67,77 64,81 60,82 C56,77 54,72 52,69 Z" />
+
     </group>
 </vector>
