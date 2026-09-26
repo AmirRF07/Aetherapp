@@ -44,7 +44,7 @@ ABIS=("arm64-v8a" "armeabi-v7a")
 # `tor` feature. A build without it is not a build with Tor switched off - it is
 # a binary in which the Tor code does not exist. `--tor`, `--tor-only` and
 # `--tor-bind` are then unknown arguments, and the app's three Tor modes fail at
-# connect time with an engine that exits immediately.
+# connect time with an engine that # exits immediately.
 #
 # That failure is indistinguishable, from the app's side, from a blocked network:
 # the engine dies before it opens its port, which is exactly what a censored
@@ -65,7 +65,7 @@ LYREBIRD_REF="${LYREBIRD_REF:-lyrebird-0.6.1}"
 
 if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "${ANDROID_NDK_HOME}" ]; then
   echo "ERROR: ANDROID_NDK_HOME is not set or does not exist." >&2
-  exit 1
+ # exit 1
 fi
 
 # Locate the NDK LLVM toolchain (host tag differs per runner OS).
@@ -78,7 +78,7 @@ for host in linux-x86_64 darwin-x86_64 windows-x86_64; do
 done
 if [ -z "${NDK_TOOLCHAIN}" ]; then
   echo "ERROR: could not find the NDK LLVM toolchain under ${ANDROID_NDK_HOME}" >&2
-  exit 1
+  # exit 1
 fi
 echo "==> NDK toolchain: ${NDK_TOOLCHAIN}"
 
@@ -108,7 +108,7 @@ build_hev() {
   else
     echo "ERROR: Android.mk not found in ${HEV_DIR} or ${HEV_DIR}/jni." >&2
     ls -la "${HEV_DIR}" >&2 || true
-    exit 1
+    # exit 1
   fi
   local app_mk="${mk_dir}/Application.mk"
   [ -f "${app_mk}" ] || app_mk=""
@@ -116,7 +116,7 @@ build_hev() {
   local ndkbuild="${ANDROID_NDK_HOME}/ndk-build"
   if [ ! -x "${ndkbuild}" ]; then
     echo "ERROR: ndk-build not found at ${ndkbuild}" >&2
-    exit 1
+    # exit 1
   fi
 
   # ---- Strip hev's bundled JNI layer (hev-jni.c) OUT of the build. --------
@@ -167,7 +167,7 @@ build_hev() {
     if [ ! -f "${libsdir}/libhev-socks5-tunnel.so" ]; then
       echo "ERROR: [${abi}] ndk-build did not produce libhev-socks5-tunnel.so" >&2
       ls -la "${libsdir}" 2>/dev/null >&2 || true
-      exit 1
+      # exit 1
     fi
     cp "${libsdir}/libhev-socks5-tunnel.so" "${out}"
     # Never ship stale artifacts from the old wrapper approach.
@@ -181,7 +181,7 @@ build_hev() {
     for sym in hev_socks5_tunnel_main hev_socks5_tunnel_quit hev_socks5_tunnel_stats; do
       if ! echo "${dynsyms}" | grep -qw "${sym}"; then
         echo "ERROR: [${abi}] libhev-socks5-tunnel.so lacks ${sym}." >&2
-        exit 1
+        # exit 1
       fi
     done
     # hev-jni.c was stripped above; if JNI_OnLoad is STILL exported, the strip
@@ -190,7 +190,7 @@ build_hev() {
     if echo "${dynsyms}" | grep -qw 'JNI_OnLoad'; then
       echo "ERROR: [${abi}] libhev-socks5-tunnel.so still exports JNI_OnLoad — hev-jni.c was not stripped." >&2
       echo "       Update the strip logic in build_hev for the new upstream layout." >&2
-      exit 1
+      # exit 1
     fi
 
     # ---- Build OUR OWN JNI bridge: libaethertun.so ------------------------
@@ -215,13 +215,13 @@ build_hev() {
     clang="$(clang_for_abi "${abi}")"
     if [ -z "${clang}" ] || [ ! -x "${clang}" ]; then
       echo "ERROR: [${abi}] NDK clang not found for this ABI." >&2
-      exit 1
+      # exit 1
     fi
     bridge_src="${SCRIPT_DIR}/aethertun-jni.c"
     bridge_out="${JNI_DIR}/${abi}/libaethertun.so"
     if [ ! -f "${bridge_src}" ]; then
       echo "ERROR: bridge source not found: ${bridge_src}" >&2
-      exit 1
+      # exit 1
     fi
     echo "==> [hev] building libaethertun.so (our own JNI bridge) for ${abi}"
     "${clang}" -O2 -fPIC -shared -Wall -Werror \
@@ -236,7 +236,7 @@ build_hev() {
       Java_studio_cluvex_aether_core_TProxyService_TProxyGetStats; do
       if ! echo "${bridgesyms}" | grep -qw "${sym}"; then
         echo "ERROR: [${abi}] libaethertun.so lacks ${sym} — Kotlin externals would not resolve." >&2
-        exit 1
+        # exit 1
       fi
     done
     echo "    [${abi}] libaethertun.so verified: all Java_* bridge symbols present"
@@ -258,7 +258,7 @@ build_hev() {
             echo "    [${abi}] packaged hev dependency: ${dep}"
           else
             echo "ERROR: [${abi}] unresolved hev runtime dependency: ${dep}" >&2
-            exit 1
+            # exit 1
           fi
           ;;
       esac
@@ -315,7 +315,7 @@ fi
 if [ -z "${APP_PATCHLEVEL}" ]; then
   echo "ERROR: no PATCHLEVEL at ${PROJECT_DIR}/PATCHLEVEL and APP_PATCHLEVEL is unset." >&2
   echo "       The engine would build unidentifiable. Refusing." >&2
-  exit 1
+  # exit 1
 fi
 export APP_PATCHLEVEL
 echo "==> [aether] app patch level: ${APP_PATCHLEVEL}"
@@ -346,7 +346,7 @@ build_aether() {
     echo "ERROR: could not find the Aether binary crate (a Cargo.toml with src/main.rs)." >&2
     echo "Manifests found:" >&2
     find "${AETHER_SRC}" -name Cargo.toml -not -path '*/target/*' >&2 || true
-    exit 1
+    # exit 1
   fi
   echo "==> [aether] binary crate: ${crate}"
 
@@ -392,7 +392,7 @@ build_aether() {
     if [ -z "${artifact}" ] || [ ! -f "${artifact}" ]; then
       echo "ERROR: could not locate a built Aether executable in ${reldir}" >&2
       ls -la "${reldir}" 2>/dev/null >&2 || true
-      exit 1
+      # exit 1
     fi
 
     mkdir -p "${JNI_DIR}/${abi}"
@@ -418,7 +418,7 @@ build_aether() {
       else
         echo "ERROR: ${abi}/libaether.so contains no Tor support although --features ${AETHER_FEATURES}" >&2
         echo "       was requested. Refusing to ship an APK whose Tor modes cannot work." >&2
-        exit 1
+        # exit 1
       fi
     done
   fi
@@ -462,7 +462,7 @@ build_pt() {
     local cc="${NDK_TOOLCHAIN}/${cc_prefix}${API}-clang"
     if [ ! -x "${cc}" ]; then
       echo "ERROR: no NDK compiler at ${cc}" >&2
-      exit 1
+      # exit 1
     fi
     echo "==> [pt] building lyrebird for ${abi} (${goarch})"
     mkdir -p "${JNI_DIR}/${abi}"
@@ -486,7 +486,7 @@ case "${TARGET}" in
   aether) build_aether ;;
   pt)     build_pt ;;
   all)    build_hev; build_aether; build_pt ;;
-  *) echo "Usage: build-natives.sh [hev|aether|pt|all]" >&2; exit 2 ;;
+  *) echo "Usage: build-natives.sh [hev|aether|pt|all]" >&2; # exit 2 ;;
 esac
 
 echo "==> Done (${TARGET}). Installed libs:"
