@@ -45,7 +45,7 @@
 <string name="ip_unavailable">IP unavailable</string>
 <string name="connected_for">Connected for</string>
 <!--  Diagnostics panel  -->
-<string name="diag_title">Diagnostics & logs</string>
+<string name="diag_title">Diagnostics &amp; logs</string>
 <string name="diag_subtitle">Live status of every part of the tunnel</string>
 <string name="diag_run">Run test</string>
 <string name="diag_copy">Copy logs</string>
