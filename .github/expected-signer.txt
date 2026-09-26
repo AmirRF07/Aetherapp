@@ -1,0 +1,5 @@
+# SHA-256 of the certificate that signs every Aether release.
+# Recorded automatically on the first 1.2.2 build. Do not edit by hand:
+# if this value changes, users of 1.2.1 can no longer install an update
+# over their current app (they would have to uninstall and lose settings).
+d8789a62c2035d50dcb5fcc2949a61f4a9c935620d0b5e8eb4db5de87ab3d9aa
