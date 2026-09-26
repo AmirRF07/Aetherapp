@@ -28,7 +28,7 @@
     </queries>
 
     <application
-        android:name=".AetherApp"
+        android:name=".AvatarApp"
         android:allowBackup="false"
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules"
