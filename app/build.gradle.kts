@@ -117,15 +117,15 @@ if (useCiKeystore) {
 }
 
 android {
-    namespace = "studio.cluvex.aether"
+    namespace = "Avatar"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "studio.cluvex.aether"
+        applicationId = "Avatar"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "1.3.0"
+        versionCode = 15
+        versionName = "1.3.1"
 
         ndk {
             // We ship arm64 (primary) and arm builds.
