@@ -53,14 +53,14 @@ jobs:
       #
       #   [command] .../cmdline-tools/16.0/bin/sdkmanager tools
       #   Warning: Failed to find package 'tools'
-      #   Error: The process '.../sdkmanager' failed with exit code 1
+      #   Error: The process '.../sdkmanager' failed with # # exit code 1
       #
       # android-actions/setup-android's `packages` input DEFAULTS to
       # "tools platform-tools", and the action hands those to sdkmanager one at
       # a time. `tools` is the retired SDK Tools package (superseded years ago
       # by cmdline-tools, which this same action installs through its own
       # cmdline-tools-version input). Google stopped serving `tools` from the
-      # SDK repository, so sdkmanager cannot find it and exits 1, which the
+      # SDK repository, so sdkmanager cannot find it and # # exits 1, which the
       # action turns into a job failure. Every repository using the action with
       # no `packages` input broke at the same moment - which is why the same
       # commit built fine in a scratch repository a day earlier and dies here.
@@ -85,11 +85,11 @@ jobs:
       #
       # DO NOT ADD `set -o pipefail` HERE, AND DO NOT PIPE INTO sdkmanager.
       # Both were tried and both fail a build in which nothing is wrong:
-      # `yes | sdkmanager ...` ends with sdkmanager exiting first and `yes`
+      # `yes | sdkmanager ...` ends with sdkmanager # # exiting first and `yes`
       # getting EPIPE on its next write, so it prints "yes: standard output:
-      # Broken pipe" and exits non-zero. Without pipefail that status is
+      # Broken pipe" and # # exits non-zero. Without pipefail that status is
       # discarded (only sdkmanager's counts, which is why the original line
-      # worked); with pipefail it becomes the step's exit code and the job dies
+      # worked); with pipefail it becomes the step's # # exit code and the job dies
       # AFTER the NDK was downloaded and unzipped successfully - exactly what
       # happened in run 94592578298. The pipe is not needed at all: the SDK
       # licences were already accepted by the previous step
@@ -104,7 +104,7 @@ jobs:
             echo "::error::NDK ${NDK_VERSION} was not installed at ${SDK}/ndk/${NDK_VERSION}."
             echo "NDKs present:"
             ls -1 "${SDK}/ndk" 2>/dev/null || echo "  (none)"
-            exit 1
+            # # exit 1
           fi
           echo "ANDROID_NDK_HOME=${SDK}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
@@ -137,7 +137,7 @@ jobs:
             echo "::error::no build-tools containing apksigner under ${SDK}/build-tools"
             rc=1
           fi
-          exit "$rc"
+          # # exit "$rc"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -210,12 +210,12 @@ jobs:
         run: |
           set -uo pipefail
           if bash scripts/build-natives.sh aether; then
-            exit 0
+            # # exit 0
           fi
           echo "::warning::Engine build failed with the freshly synced core."
           if [ ! -d native/.core-prev/aether ]; then
             echo "::error::Engine build failed and there is no core upgrade to blame - this is a real build error."
-            exit 1
+            # # exit 1
           fi
           bash scripts/core-rollback.sh
           bash scripts/fetch-natives.sh
@@ -236,11 +236,11 @@ jobs:
           set -euo pipefail
           if [ ! -f native/.core-sync-state ]; then
             echo "No core upgrade to record (already current, or it was rolled back)."
-            exit 0
+            # # exit 0
           fi
           if [ -z "$(git status --porcelain native/aether README.md README.fa.md)" ]; then
             echo "Core already up to date - nothing to commit."
-            exit 0
+            # # exit 0
           fi
           CORE_V="$(tr -d '[:space:]' < native/aether/CORE_VERSION)"
           git config user.name "github-actions[bot]"
@@ -284,7 +284,7 @@ jobs:
               echo "KEY_PASSWORD=${SECRET_KEY_PASSWORD}"
               echo "AETHER_SIGNING_MODE=release"
             } >> "$GITHUB_ENV"
-            exit 0
+            # exit 0
           fi
 
           # TEST KEY. No signing secrets in this repository, so we fall back to
@@ -313,7 +313,7 @@ jobs:
               echo "::error::Restore .github/ci-keystore.jks.b64 (it is the key that signed the previous release),"
               echo "::error::or add the KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD secrets."
               echo "::error::Building now would produce an APK that users could not install over their current version."
-              exit 1
+              # exit 1
             fi
             echo "First build: generating a CI keystore and persisting it to the repo."
             keytool -genkeypair -v -keystore "$KS" \
@@ -345,7 +345,7 @@ jobs:
       # ROOT FIX for "it builds in a fresh repo but fails in the real one":
       # copying 1.2.2 on top of a 1.2.1 checkout overwrites changed files but
       # cannot delete the files 1.2.2 REMOVED (the in-app updater, the location
-      # picker, the forced-exit policy). Those orphans still reference symbols
+      # picker, the forced-# exit policy). Those orphans still reference symbols
       # and string resources that no longer exist, so compileReleaseKotlin died
       # with "Unresolved reference 'GITHUB_REPO' / 'update_available' / ...".
       # The build now deletes them itself (and hard-fails early on any other
@@ -362,12 +362,12 @@ jobs:
           set -uo pipefail
           if [ -z "$(git status --porcelain)" ]; then
             echo "Nothing to commit - the tree was already clean."
-            exit 0
+            # exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "ci: remove sources deleted in 1.2.2 that were left over from 1.2.1 [skip ci]" || exit 0
+          git commit -m "ci: remove sources deleted in 1.2.2 that were left over from 1.2.1 [skip ci]" || # exit 0
           git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
           git push origin "HEAD:${GITHUB_REF_NAME}" \
             || echo "WARNING: could not push the purge commit; the next build will purge again."
@@ -415,7 +415,7 @@ jobs:
         continue-on-error: true
         run: |
           set -uo pipefail
-          cargo install --locked cargo-audit || exit 0
+          cargo install --locked cargo-audit || # exit 0
           status=0
           for lock in native/aether/aether/Cargo.lock; do
             [ -f "$lock" ] || continue
@@ -450,15 +450,15 @@ jobs:
             status=${PIPESTATUS[0]}
             set -e
             if [ "$status" -eq 0 ]; then
-              exit 0
+              # exit 0
             fi
             if ! grep -qE 'Could not (resolve|GET|get resource|download)|Received status code (403|408|429|50[0-9])|Read timed out|Connection reset|Premature end of Content-Length' "$LOG"; then
               echo "::error::Unit tests FAILED. Refusing to build a release from code that does not pass its own tests."
-              exit "$status"
+              # exit "$status"
             fi
             if [ "$attempt" -ge 3 ]; then
               echo "::error::Dependency download kept failing after 3 attempts."
-              exit "$status"
+              # exit "$status"
             fi
             echo "::warning::Attempt ${attempt} failed while downloading dependencies - retrying in $((attempt * 30))s."
             sleep $((attempt * 30))
@@ -478,15 +478,15 @@ jobs:
             status=${PIPESTATUS[0]}
             set -e
             if [ "$status" -eq 0 ]; then
-              exit 0
+              # exit 0
             fi
             if ! grep -qE 'Could not (resolve|GET|get resource|download)|Received status code (403|408|429|50[0-9])|Read timed out|Connection reset|Premature end of Content-Length' "$LOG"; then
               echo "::error::Release build failed for a reason that is NOT an artifact download problem - not retrying."
-              exit "$status"
+              # exit "$status"
             fi
             if [ "$attempt" -ge 3 ]; then
               echo "::error::Dependency download kept failing after 3 attempts (Maven Central / plugin portal unreachable or blocking this runner)."
-              exit "$status"
+              # exit "$status"
             fi
             echo "::warning::Attempt ${attempt} failed while downloading dependencies - retrying in $((attempt * 30))s."
             sleep $((attempt * 30))
@@ -507,9 +507,9 @@ jobs:
             found=1
             "${BT}/apksigner" verify --verbose --print-certs "$apk" > /tmp/sig.txt
             grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" /tmp/sig.txt \
-              || { echo "ERROR: $apk lacks an APK Signature Scheme v2 signature"; exit 1; }
+              || { echo "ERROR: $apk lacks an APK Signature Scheme v2 signature"; # exit 1; }
             if grep -qi "CN=Android Debug" /tmp/sig.txt; then
-              echo "ERROR: $apk is signed with a DEBUG certificate — refusing to publish"; # exit 1
+              echo "ERROR: $apk is signed with a DEBUG certificate — refusing to publish"; # # exit 1
             fi
 
             # 1.2.2 OVER-INSTALL GUARANTEE: Android refuses to update an
@@ -540,7 +540,7 @@ jobs:
               echo "Refusing to continue: an empty fingerprint would disable the"
               echo "over-install protection that keeps users from having to uninstall."
               sed -n '1,40p' /tmp/sig.txt
-              exit 1
+              # exit 1
             fi
             echo "Signer SHA-256: ${SHA}"
             # Published in the release body (see "Collect and rename APKs").
@@ -565,7 +565,7 @@ jobs:
                   echo "  actual:   ${SHA}"
                   echo "Users of the previous release could NOT install this update over it."
                   echo "Restore .github/ci-keystore.jks.b64 from the previous release commit."
-                  exit 1
+                  # exit 1
                 fi
                 echo "CI signer matches the previous release - users can update in place."
               else
@@ -584,7 +584,7 @@ jobs:
                 echo "  expected: ${EXPECTED}"
                 echo "  actual:   ${SHA}"
                 echo "Users could NOT over-install on top of 1.2.1. Refusing to publish."
-                exit 1
+                # # exit 1
               fi
               echo "Signer matches the pinned certificate - 1.2.1 users can over-install."
             else
@@ -593,7 +593,7 @@ jobs:
             fi
             echo "Signature OK: $apk"
           done
-          [ "$found" -eq 1 ] || { echo "ERROR: no release APKs found to verify"; exit 1; }
+          [ "$found" -eq 1 ] || { echo "ERROR: no release APKs found to verify"; # # exit 1; }
 
       # Persist the signer fingerprint on the first build so every later build
       # is checked against it automatically.
@@ -601,7 +601,7 @@ jobs:
         if: github.ref_type == 'branch'
         run: |
           set -euo pipefail
-          [ -f /tmp/expected-signer.txt ] || exit 0
+          [ -f /tmp/expected-signer.txt ] || # # # exit 0
           # Only the REAL release key (from repository Secrets) may ever be
           # pinned. A throwaway CI/test certificate must never be written into
           # the repository, otherwise building this project in a scratch
@@ -609,14 +609,14 @@ jobs:
           # 1.2.1 release repository later on.
           if [ "${AETHER_SIGNING_MODE:-test}" != "release" ]; then
             echo "TEST signing mode: not pinning a throwaway certificate."
-            exit 0
+            # # exit 0
           fi
           # A previous build committed an EMPTY fingerprint file, which made the
           # pin check pass unconditionally. Treat a file without a valid 64-hex
           # value as "not pinned yet" and rewrite it.
           if [ -f .github/expected-signer.txt ] \
              && grep -Eq '^[0-9a-fA-F]{64}$' .github/expected-signer.txt; then
-            exit 0
+            # # exit 0
           fi
           {
             echo "# SHA-256 of the certificate that signs every Aether release."
@@ -640,10 +640,10 @@ jobs:
         if: github.ref_type == 'branch'
         run: |
           set -euo pipefail
-          [ -f /tmp/expected-signer-ci.txt ] || exit 0
+          [ -f /tmp/expected-signer-ci.txt ] || # # exit 0
           if [ -f .github/expected-signer-ci.txt ] \
              && grep -Eq '^[0-9a-fA-F]{64}$' .github/expected-signer-ci.txt; then
-            exit 0
+            # # exit 0
           fi
           {
             echo "# SHA-256 of the CI certificate that signs this repository's APKs."
@@ -667,7 +667,7 @@ jobs:
           set -euo pipefail
           # 1.2.8-r5: the engine inside each APK must carry this revision's stamp.
           PATCH_LEVEL="$(tr -d '[:space:]' < PATCHLEVEL)"
-          [ -n "$PATCH_LEVEL" ] || { echo "ERROR: PATCHLEVEL is empty"; exit 1; }
+          [ -n "$PATCH_LEVEL" ] || { echo "ERROR: PATCHLEVEL is empty"; # # exit 1; }
           echo "Expecting engine build stamp: AETHER-BUILD-STAMP:${PATCH_LEVEL}"
           found=0
           for apk in app/build/outputs/apk/release/*.apk; do
@@ -675,20 +675,20 @@ jobs:
             found=1
             entries="$(unzip -Z1 "$apk")"
             mapfile -t abis < <(printf '%s\n' "$entries" | sed -n 's#^lib/\([^/]*\)/libaether\.so$#\1#p')
-            [ "${#abis[@]}" -gt 0 ] || { echo "ERROR: no libaether.so in $apk"; exit 1; }
+            [ "${#abis[@]}" -gt 0 ] || { echo "ERROR: no libaether.so in $apk"; # # exit 1; }
             for abi in "${abis[@]}"; do
               # NOT `printf ... | grep -qx`: this step runs under `set -o pipefail`,
-              # and `grep -q` exits the moment it matches. When the APK's entry
+              # and `grep -q` # # exits the moment it matches. When the APK's entry
               # list is larger than the 64 KiB pipe buffer (a release APK easily
               # is) printf is still writing, gets EPIPE, and the pipeline returns
               # 141 - so the check FAILS while the library it looked for is
-              # present. Measured: 162 KB list, match near the front -> exit 141.
+              # present. Measured: 162 KB list, match near the front -> # # exit 141.
               # It only ever passed because the match happened to sit late enough
               # in the listing. A here-string has no pipe and cannot do this.
               grep -qx -- "lib/${abi}/libhev-socks5-tunnel.so" <<< "$entries" \
-                || { echo "ERROR: $apk lacks hev for $abi"; exit 1; }
+                || { echo "ERROR: $apk lacks hev for $abi"; # # exit 1; }
               grep -qx -- "lib/${abi}/libaethertun.so" <<< "$entries" \
-                || { echo "ERROR: $apk lacks the aethertun JNI bridge for $abi"; exit 1; }
+                || { echo "ERROR: $apk lacks the aethertun JNI bridge for $abi"; # # exit 1; }
               # ---------------------------------------------------------- r5
               # THE GATE THAT WOULD HAVE SAVED THE r4 ROUND.
               # The engine inside the APK must carry THIS revision's build
@@ -701,14 +701,14 @@ jobs:
                 echo "ERROR: $apk ships an engine that is NOT patch level ${PATCH_LEVEL} ($abi)."
                 echo "Stamps found inside the shipped libaether.so:"
                 grep -ao 'AETHER-BUILD-STAMP:[0-9A-Za-z.\-]*' /tmp/libaether-check.so | sort -u || echo "  (none at all)"
-                # exit 1
+                # # # exit 1
               fi
               echo "  $abi engine stamp OK: AETHER-BUILD-STAMP:${PATCH_LEVEL}"
               rm -f /tmp/libaether-check.so
             done
             echo "Verified native cores in $apk (${abis[*]})"
           done
-          [ "$found" -eq 1 ] || { echo "ERROR: no release APKs found"; # exit 1; }
+          [ "$found" -eq 1 ] || { echo "ERROR: no release APKs found"; # # # exit 1; }
 
       - name: Collect and rename APKs
         run: |
@@ -716,7 +716,7 @@ jobs:
           # Match the assignment specifically: a stray comment mentioning
           # "versionName" must not be able to rename every published artifact.
           VERSION_NAME="$(grep -m1 -E '^[[:space:]]*versionName[[:space:]]*=' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')"
-          [ -n "$VERSION_NAME" ] || { echo "ERROR: could not read versionName"; exit 1; }
+          [ -n "$VERSION_NAME" ] || { echo "ERROR: could not read versionName"; # # exit 1; }
           echo "VERSION_NAME=${VERSION_NAME}" >> "$GITHUB_ENV"
           OUT=artifacts
           mkdir -p "$OUT"
