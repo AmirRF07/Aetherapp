@@ -324,15 +324,6 @@ echo "==> [aether] app patch level: ${APP_PATCHLEVEL}"
 PATCH_STAMP="AETHER-BUILD-STAMP:${APP_PATCHLEVEL}"
 
 # verify_patch_stamp <abi> <so>
-#
-# NOTE (temporary): the hard `exit 1` below is disabled. On armeabi-v7a this
-# check has been reporting the stamp as missing even though the very next
-# line's own grep (used to print "stamps actually present") finds it present -
-# i.e. a flaky/racy check, not a real stale-engine problem. Turning the check
-# back into a hard failure is worth doing once that race is understood
-# (candidate cause: reading the .so while llvm-strip's output is still being
-# flushed to disk on that ABI). Until then this only WARNS so a real build
-# is not blocked by a check that is itself unreliable.
 verify_patch_stamp() {
   local abi="$1" so="$2"
   if ! grep -qa -- "${PATCH_STAMP}" "${so}"; then
@@ -343,7 +334,7 @@ verify_patch_stamp() {
     echo "       reverted the app patches. Do NOT ship this." >&2
     echo "       Stamps actually present in the binary:" >&2
     grep -ao 'AETHER-BUILD-STAMP:[0-9A-Za-z.\-]*' "${so}" 2>/dev/null | sort -u | sed 's/^/         /' >&2 || true
-    # exit 1  # intentionally disabled - see NOTE above
+    exit 1
   fi
   echo "    [${abi}] build stamp verified: ${PATCH_STAMP}"
 }
