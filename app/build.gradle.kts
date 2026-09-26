@@ -117,11 +117,11 @@ if (useCiKeystore) {
 }
 
 android {
-    namespace = "Avatar"
+    namespace = "studio.cluvex.aether"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "Avatar"
+        applicationId = "com.amirrf07.avatar"
         minSdk = 26
         targetSdk = 35
         versionCode = 15
