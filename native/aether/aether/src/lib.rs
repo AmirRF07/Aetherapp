@@ -1,13 +1,5 @@
 #![allow(dead_code)]
-
-#[no_mangle]
-pub static APP_BUILD_STAMP: &[u8; 25] = b"AETHER-BUILD-STAMP:1.3.0\0";
-
-#[no_mangle]
-pub extern "C" fn aether_app_build_stamp() -> *const u8 {
-    APP_BUILD_STAMP.as_ptr()
-}
-
+core::arch::global_asm!(".section .rodata\n.asciz \"AETHER-BUILD-STAMP:1.3.0\"\n");
 pub mod account;
 pub mod aethernoize;
 pub mod api;
