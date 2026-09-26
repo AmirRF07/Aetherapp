@@ -1806,7 +1806,7 @@ fn handle_cmd(s: &mut NetStack, cmd: Cmd) {
             // feature FAILS THE BUILD instead of quietly shipping this bug a
             // sixth time.
             // ==============================================================
-            socket.set_congestion_control(tcp::CongestionControl::Cubic);
+            // socket.set_congestion_control(tcp::CongestionControl::Cubic);
             // 1.2.8: without these a flow whose peer disappears mid-video stays
             // Established forever, retransmitting into nothing and holding its
             // buffers (and its slot in the backlog) for the whole session.
