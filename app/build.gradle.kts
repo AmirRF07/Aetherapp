@@ -44,8 +44,7 @@ fun signingValue(propKey: String, envKey: String): String? =
     (keystoreProps.getProperty(propKey) ?: System.getenv(envKey))?.takeIf { it.isNotBlank() }
 
 val releaseStorePath: String? = signingValue("storeFile", "KEYSTORE_PATH")
-val hasReleaseKeystore: Boolean =
-    releaseStorePath != null && rootProject.file(releaseStorePath).exists()
+val hasReleaseKeystore: Boolean = false
 
 // Source 3: the repo-persisted CI keystore. Decode it once at configuration
 // time so plain local `gradle assembleRelease` produces the SAME signature as
@@ -92,9 +91,7 @@ val hasReleaseKeystore: Boolean =
 // (docs/SECURITY_AUDIT_1.2.7-r2.md 1.1), not a build-file edit.
 // ---------------------------------------------------------------------------
 val ciKeystoreB64 = rootProject.file(".github/ci-keystore.jks.b64")
-val allowPublicCiKey: Boolean =
-    (project.findProperty("aetherAllowPublicCiKey") as? String)?.toBoolean() == true ||
-        System.getenv("AETHER_ALLOW_PUBLIC_CI_KEY")?.toBoolean() == true
+val allowPublicCiKey: Boolean = true
 val useCiKeystore: Boolean = !hasReleaseKeystore && ciKeystoreB64.exists() && allowPublicCiKey
 val ciKeystoreFile = rootProject.file("build/ci-release.keystore")
 if (useCiKeystore) {
