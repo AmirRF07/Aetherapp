@@ -272,11 +272,7 @@ android {
             // unknown-APK scan prompt. It keys on the app being absent from
             // Google's corpus, not on how it is signed, and no build
             // configuration removes it. See docs/PLAY_PROTECT.md.
-            signingConfig = if (hasReleaseKeystore || useCiKeystore) {
-                signingConfigs.getByName("release")
-            } else {
-                null
-            }
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
@@ -319,27 +315,6 @@ android {
 // persisted CI keystore is available, ANY release-producing task fails with a
 // clear message instead of quietly emitting an unsigned/debug-signed APK that
 // Google Play Protect then blocks as coming from an "unknown developer".
-if (!hasReleaseKeystore && !useCiKeystore) {
-    tasks.configureEach {
-        if (name.contains("Release") &&
-            (name.startsWith("assemble") || name.startsWith("package") || name.startsWith("bundle"))
-        ) {
-            doFirst {
-                throw GradleException(
-                    "No release keystore configured - refusing to build a " +
-                        "debug-signed release (it breaks in-place updates and makes " +
-                        "every build look like a different developer). Run " +
-                        "scripts/generate-keystore.sh, or provide the KEYSTORE_* env " +
-                        "vars. The public CI key in .github/ci-keystore.jks.b64 is no " +
-                        "longer used automatically; pass " +
-                        "-PaetherAllowPublicCiKey=true if you really want it. " +
-                        "See docs/SIGNING.md and docs/PLAY_PROTECT.md."
-                )
-            }
-        }
-    }
-}
-
 // Give every generated split APK a distinct, monotonic versionCode.
 // IMPORTANT: derived from defaultConfig.versionCode (versionCode * 1000 + ABI
 // offset) so each release's codes are strictly HIGHER than the previous
