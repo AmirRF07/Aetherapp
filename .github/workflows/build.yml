@@ -101,10 +101,11 @@ jobs:
           SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?Android SDK root is not set}}"
           sdkmanager --install "ndk;${NDK_VERSION}" </dev/null
           if [ ! -d "${SDK}/ndk/${NDK_VERSION}" ]; then
+              true
             echo "::error::NDK ${NDK_VERSION} was not installed at ${SDK}/ndk/${NDK_VERSION}."
             echo "NDKs present:"
             ls -1 "${SDK}/ndk" 2>/dev/null || echo "  (none)"
-            # # exit 1
+             # exit 1
           fi
           echo "ANDROID_NDK_HOME=${SDK}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
@@ -210,12 +211,14 @@ jobs:
         run: |
           set -uo pipefail
           if bash scripts/build-natives.sh aether; then
-            # # exit 0
+            true
+             # exit 0
           fi
           echo "::warning::Engine build failed with the freshly synced core."
           if [ ! -d native/.core-prev/aether ]; then
             echo "::error::Engine build failed and there is no core upgrade to blame - this is a real build error."
-            # # exit 1
+              true
+              # exit 1
           fi
           bash scripts/core-rollback.sh
           bash scripts/fetch-natives.sh
@@ -236,11 +239,13 @@ jobs:
           set -euo pipefail
           if [ ! -f native/.core-sync-state ]; then
             echo "No core upgrade to record (already current, or it was rolled back)."
-            # # exit 0
+            true
+             # exit 0
           fi
           if [ -z "$(git status --porcelain native/aether README.md README.fa.md)" ]; then
             echo "Core already up to date - nothing to commit."
-            # # exit 0
+            true
+            # exit 0
           fi
           CORE_V="$(tr -d '[:space:]' < native/aether/CORE_VERSION)"
           git config user.name "github-actions[bot]"
