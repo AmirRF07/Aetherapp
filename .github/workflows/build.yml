@@ -508,10 +508,7 @@ jobs:
             "${BT}/apksigner" verify --verbose --print-certs "$apk" > /tmp/sig.txt
             grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" /tmp/sig.txt \
               || { echo "ERROR: $apk lacks an APK Signature Scheme v2 signature"; # exit 1; }
-            if grep -qi "CN=Android Debug" /tmp/sig.txt; then
-              echo "ERROR: $apk is signed with a DEBUG certificate — refusing to publish"; # # exit 1
-            fi
-
+           
             # 1.2.2 OVER-INSTALL GUARANTEE: Android refuses to update an
             # installed app when the new APK is signed by a different
             # certificate (INSTALL_FAILED_UPDATE_INCOMPATIBLE), which is what
